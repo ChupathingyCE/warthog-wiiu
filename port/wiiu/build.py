@@ -326,12 +326,16 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
     # stay the desktop builds'
     file_names = f"-fmacro-prefix-map={_quote(game.as_posix() + '/')}=" if game != Path(".") else ""
 
+    # (the SDK declarations are read as system headers, which the depfiles
+    # leave out: every unit waits for them)
+    xdk_headers = sorted((game / XDK_INCLUDE).glob("*.h"))
+
     def add_object(source: Path, cflags: str, implicit: List[Path] = ()) -> None:
         obj = (obj_dir / source.relative_to(build_dir) if build_dir in source.parents
                else port.output_path(obj_dir, source)).with_suffix(".o")
         objects.append(obj)
         n.build(outputs=obj, rule="wiiu_cc", inputs=source,
-                implicit=[prefix_header, *implicit],
+                implicit=[prefix_header, *xdk_headers, *implicit],
                 variables={"cflags": f"{cflags} {file_names}".rstrip()})
 
     defines = console_defines(sln)
@@ -410,12 +414,6 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
     # declarations): its window, input and the rest of sdl_platform.h
     for source in sorted((port_dir / "platform").glob("*.c")):
         add_object(source, f"{platform_cflags} -I{_quote(port_dir / 'src')}")
-
-    # SDL's utility functions the platform layer calls (files and folders,
-    # the audio device's and OpenGL's lookups), as the dedicated server has
-    # them without SDL (the game's server/platform/sdl_headless.c)
-    add_object(game / "server" / "platform" / "sdl_headless.c",
-               f"{posix_cflags} -isystem {_quote(sdl_include)}")
 
     # the port's own units: the console, through wut
     console_cflags = " ".join([

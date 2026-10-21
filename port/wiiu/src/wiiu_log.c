@@ -8,9 +8,8 @@ on a console Aroma's logging, which udplogserver reads on the network), and
 to sd:/wiiu/apps/halo/port.txt, which the owner of a console can send back.
 The game's own debug.txt is the game's (its logs folder, port_config.c).
 
-The file is opened once the SD card is there (wut mounts it as
-fs:/vol/external01 at start-up) and flushed at most twice a second, and at
-once for a line that says something failed.
+The file is on the SD card (wut mounts it as fs:/vol/external01 at
+start-up), begun again at each start.
 */
 
 #include <stdarg.h>
@@ -18,6 +17,7 @@ once for a line that says something failed.
 #include <string.h>
 #include <sys/iosupport.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <coreinit/debug.h>
 #include <coreinit/mutex.h>
@@ -25,14 +25,14 @@ once for a line that says something failed.
 
 #include "wiiu_port.h"
 
-#define LOG_FOLDER "fs:/vol/external01/wiiu/apps/halo"
+#define LOG_FOLDER WIIU_APP_FOLDER
 #define LOG_PATH LOG_FOLDER "/port.txt"
 
 static OSMutex log_mutex;
 static int log_ready;
 static FILE *log_file;
 static int log_file_failed;
-static OSTime log_flushed_at;
+static int log_started;
 /* a line being put together from writes without its newline yet */
 static char pending[512];
 static size_t pending_length;
@@ -49,29 +49,30 @@ static void log_initialize(void)
 /* (the mutex held) */
 static void log_line(const char *line)
 {
-	OSTime now;
-
 	OSReport("%s\n", line);
-	if (!log_file && !log_file_failed)
+	wiiu_screen_line(line);
+	if (log_file_failed)
+		return;
+	/* (opened for each line, while the port is brought up: a crash or a
+	stop loses none, on a console or in an emulator that writes a file out
+	only when it is closed) */
+	if (!log_started)
 	{
 		mkdir("fs:/vol/external01/wiiu", 0777);
 		mkdir("fs:/vol/external01/wiiu/apps", 0777);
 		mkdir(LOG_FOLDER, 0777);
-		log_file = fopen(LOG_PATH, "w");
-		if (!log_file)
-			log_file_failed = 1;
 	}
+	log_file = fopen(LOG_PATH, log_started ? "a" : "w");
 	if (!log_file)
+	{
+		log_file_failed = 1;
 		return;
+	}
+	log_started = 1;
 	fputs(line, log_file);
 	fputc('\n', log_file);
-	now = OSGetTime();
-	if (now - log_flushed_at > OSMillisecondsToTicks(500) || strstr(line, "FAIL") || strstr(line, "fail") ||
-		strstr(line, "assert") || strstr(line, "exception") || strstr(line, "crash"))
-	{
-		fflush(log_file);
-		log_flushed_at = now;
-	}
+	fclose(log_file);
+	log_file = NULL;
 }
 
 /* (the mutex held) a write to stdout or stderr: whole lines out */
@@ -135,6 +136,17 @@ void wiiu_log(const char *format, ...)
 	va_end(arguments);
 }
 
+void wiiu_log_lock(void)
+{
+	log_initialize();
+	OSLockMutex(&log_mutex);
+}
+
+void wiiu_log_unlock(void)
+{
+	OSUnlockMutex(&log_mutex);
+}
+
 void wiiu_log_flush(void)
 {
 	if (!log_ready)
@@ -146,8 +158,6 @@ void wiiu_log_flush(void)
 		log_line(pending);
 		pending_length = 0;
 	}
-	if (log_file)
-		fflush(log_file);
 	OSUnlockMutex(&log_mutex);
 }
 
@@ -162,4 +172,8 @@ __attribute__((constructor(101))) static void log_attach(void)
 	setvbuf(stderr, NULL, _IONBF, 0);
 	wiiu_log("Chupathingy for Wii U %s starting", HALO_VERSION);
 	wiiu_memory_report();
+	/* the game's folder is its working folder: maps/, the settings and the
+	logs are found from there, as beside a desktop build's executable */
+	if (chdir(WIIU_APP_FOLDER) != 0)
+		wiiu_log("cannot use %s as the game's folder", WIIU_APP_FOLDER);
 }

@@ -47,6 +47,39 @@ static unsigned long window_size;
 static unsigned long heap_free_before, heap_free_after;
 static int window_cleared;
 
+/* a block of size on a multiple of size from the heap, or NULL. The heap's
+own alignment is not to be relied on for one this large: the room below
+the next multiple is taken by a block of its own first, so that the window
+is the next block allocated from the bottom, and given back after. */
+static void *window_allocate(MEMHeapHandle heap, unsigned long size)
+{
+	void *probe = MEMAllocFromExpHeapEx(heap, 0x1000, 0x1000);
+	uintptr_t start, aligned;
+	void *pad = NULL;
+	void *block;
+
+	if (!probe)
+		return NULL;
+	start = (uintptr_t)probe;
+	MEMFreeToExpHeap(heap, probe);
+	aligned = (start + size - 1) & ~(uintptr_t)(size - 1);
+	if (aligned > start)
+	{
+		pad = MEMAllocFromExpHeapEx(heap, (uint32_t)(aligned - start), 4);
+		if (!pad)
+			return NULL;
+	}
+	block = MEMAllocFromExpHeapEx(heap, size, 0x1000);
+	if (pad)
+		MEMFreeToExpHeap(heap, pad);
+	if (block && ((uintptr_t)block & (size - 1)))
+	{
+		MEMFreeToExpHeap(heap, block);
+		block = NULL;
+	}
+	return block;
+}
+
 /* Before the C library's start: the window first, then wut's own steps,
 which give the C library's heap the rest of MEM2. */
 void __preinit_user(MEMHeapHandle *mem1, MEMHeapHandle *foreground, MEMHeapHandle *mem2)
@@ -59,7 +92,7 @@ void __preinit_user(MEMHeapHandle *mem1, MEMHeapHandle *foreground, MEMHeapHandl
 	heap_free_before = MEMGetAllocatableSizeForExpHeapEx(*mem2, 4);
 	for (index = 0; index < sizeof(sizes) / sizeof(sizes[0]) && !window; index++)
 	{
-		window = MEMAllocFromExpHeapEx(*mem2, sizes[index], (int)sizes[index]);
+		window = window_allocate(*mem2, sizes[index]);
 		if (window)
 			window_size = sizes[index];
 	}

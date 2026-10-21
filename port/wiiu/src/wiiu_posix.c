@@ -362,43 +362,111 @@ void TIFFClose(void *file)
 }
 
 /* ---------- thread-local variables (HALO_CONSOLE_NO_THREAD_LOCAL: an RPX
-has no thread-local storage): a block per thread for each key, as
-pthread's thread-specific values */
+has no thread-local storage): each thread's table of blocks in one of the
+system's thread-specific values, a block for each key, made the first time
+the thread asks (a thread's blocks stay with its memory when it ends: the
+game's threads live as long as the game) */
 
-#include <pthread.h>
+#include <coreinit/thread.h>
 
-static pthread_mutex_t thread_local_lock = PTHREAD_MUTEX_INITIALIZER;
+#define THREAD_LOCAL_KEYS 32
+#define THREAD_LOCAL_SPECIFIC OS_THREAD_SPECIFIC_0
+
+static volatile int thread_local_key_count;
 
 void *platform_thread_local(void **key, unsigned long size)
 {
-	pthread_key_t *thread_key = (pthread_key_t *)__atomic_load_n(key, __ATOMIC_ACQUIRE);
-	void *block;
+	uintptr_t number = (uintptr_t)__atomic_load_n(key, __ATOMIC_ACQUIRE);
+	void **table;
 
-	if (!thread_key)
+	if (!number)
 	{
-		pthread_mutex_lock(&thread_local_lock);
-		thread_key = (pthread_key_t *)*key;
-		if (!thread_key)
+		uintptr_t made = (uintptr_t)__atomic_add_fetch(&thread_local_key_count, 1, __ATOMIC_ACQ_REL);
+		uintptr_t expected = 0;
+
+		if (made > THREAD_LOCAL_KEYS)
 		{
-			thread_key = malloc(sizeof(*thread_key));
-			if (!thread_key || pthread_key_create(thread_key, free) != 0)
-			{
-				wiiu_log("thread-local: no key: cannot continue");
-				abort();
-			}
-			__atomic_store_n(key, (void *)thread_key, __ATOMIC_RELEASE);
+			wiiu_log("thread-local: more than %d keys: cannot continue", THREAD_LOCAL_KEYS);
+			abort();
 		}
-		pthread_mutex_unlock(&thread_local_lock);
+		/* (another thread may have made this key first: its number stands) */
+		if (!__atomic_compare_exchange_n((uintptr_t *)key, &expected, made, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+			made = expected;
+		number = made;
 	}
-	block = pthread_getspecific(*thread_key);
-	if (!block)
+	table = OSGetThreadSpecific(THREAD_LOCAL_SPECIFIC);
+	if (!table)
 	{
-		block = calloc(1, size);
-		if (!block || pthread_setspecific(*thread_key, block) != 0)
+		table = calloc(THREAD_LOCAL_KEYS, sizeof(void *));
+		if (!table)
+		{
+			wiiu_log("thread-local: no memory: cannot continue");
+			abort();
+		}
+		OSSetThreadSpecific(THREAD_LOCAL_SPECIFIC, table);
+	}
+	if (!table[number - 1])
+	{
+		table[number - 1] = calloc(1, size);
+		if (!table[number - 1])
 		{
 			wiiu_log("thread-local: no memory: cannot continue");
 			abort();
 		}
 	}
-	return block;
+	return table[number - 1];
+}
+
+/* ---------- a file's length (posix_files.c's SetEndOfFile): a file made
+longer by writing zeros at its end, which every file system takes (Cemu's
+SD card makes a file only shorter); made shorter as the C library does */
+
+#include <reent.h>
+#include <sys/iosupport.h>
+#include <sys/stat.h>
+
+/* (the file's device's own, as the C library's ftruncate calls it) */
+static int device_truncate(int descriptor, off_t length)
+{
+	__handle *handle = __get_handle(descriptor);
+
+	if (!handle || !devoptab_list[handle->device]->ftruncate_r)
+	{
+		errno = EINVAL;
+		return -1;
+	}
+	return devoptab_list[handle->device]->ftruncate_r(_REENT, handle->fileStruct, length);
+}
+
+int ftruncate(int descriptor, off_t length)
+{
+	struct stat status;
+	off_t position;
+
+	if (fstat(descriptor, &status) != 0)
+		return -1;
+	if (length == status.st_size)
+		return 0;
+	if (length < status.st_size)
+		return device_truncate(descriptor, length);
+	position = lseek(descriptor, 0, SEEK_CUR);
+	if (position == (off_t)-1 || lseek(descriptor, 0, SEEK_END) == (off_t)-1)
+		return -1;
+	{
+		static const char zeros[4096];
+		off_t remaining = length - status.st_size;
+
+		while (remaining > 0)
+		{
+			ssize_t written = write(descriptor, zeros, remaining < (off_t)sizeof(zeros) ? (size_t)remaining : sizeof(zeros));
+
+			if (written <= 0)
+			{
+				lseek(descriptor, position, SEEK_SET);
+				return -1;
+			}
+			remaining -= written;
+		}
+	}
+	return lseek(descriptor, position, SEEK_SET) == (off_t)-1 ? -1 : 0;
 }
