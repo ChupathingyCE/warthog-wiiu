@@ -1,9 +1,8 @@
 # Wii U
 
-Scaffolding, not a port yet: `ninja wiiu` builds a stub (`build/wiiu/halo.rpx`) that logs
-a line and exits. None of the game is compiled for this console, and it has
-not run on hardware. docs/consoles.md has the status of every console and
-what each needs first.
+Being brought up: `ninja wiiu` compiles and links the whole game for the
+Wii U (`build/wiiu/halo.rpx`). It has no renderer yet. STATUS.md has
+what works, what does not, and the next step.
 
 ## Requirements
 
