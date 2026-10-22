@@ -112,12 +112,14 @@ How it is put together (the file's comment has the details):
   "c" and "c[0]"); an array is taken from its first. Values are set with
   GX2SetVertexUniformReg and GX2SetPixelUniformReg, all of a program's when
   it is newly in use, else the range written since.
-- Textures are linear surfaces, drawn into where they are sampled (SDL's
-  Wii U render targets), BGRA texels swapped to RGBA as they are copied,
-  DXT blocks as they are (GX2's surfaces take no byte swap). Cube maps and
-  volumes are in GX2's tiling, written through linear surfaces and
-  GX2CopySurface (Cemu read linear cube maps as black). Depth attachments
-  are GX2 depth buffers of their own.
+- Textures made with their texels (the map's bitmaps), DXT textures, cube
+  maps and volumes are in GX2's tiling, written through linear surfaces and
+  GX2CopySurface (Cemu read linear cube maps as black; the console stopped
+  at linear mipmapped and DXT textures). Textures made empty (render
+  targets, atlases) are linear, drawn into where they are sampled (SDL's
+  Wii U render targets). BGRA texels are swapped to RGBA as they are
+  copied, DXT blocks kept as they are (GX2's surfaces take no byte swap).
+  Depth attachments are GX2 depth buffers of their own.
 - Vertices: the map's (the Xbox window, which `d3d8_gl.c` aliases with
   `console_gl_buffer_alias` under `HALO_CONSOLE_GL_LAYER`) are fetched
   without a byte swap, the CPU's with the swap of their element's size.
@@ -265,3 +267,28 @@ linear color texture with a tiled depth buffer in MEM2). The next run:
 - `copy_vertices` copies every attribute to the ring (aligned, as many
   vertices as the indices reach), to rule the window in or out; the other
   switches that narrow a draw down are listed in the log at the start.
+
+**Third run: the textures.** With every texture replaced by the 1x1 one
+(`white_textures`) the console drew 118 draws a frame at 60 fps, flipped,
+and showed the menu: shaders, vertices, targets and presentation work. With
+the real textures the first textured draw (program 4117: a 64x64 DXT1 of 7
+levels, a 256x256 and a 128x128 RGBA8 of 9 and 8 levels, all linear) did
+not finish, and the GPU retired about one submission a second after it.
+The only linear textures known to work on the console are of one level:
+SDL's (`SDL_rtexture_wiiu.c`, `GX2_TILE_MODE_LINEAR_ALIGNED` with
+`mipLevels = 1`), Butter and Jelly's video planes (R8 and R8G8, one level)
+and our 1x1. Games' textures are tiled (decaf's
+`GX2CalcSurfaceSizeAndAlignment`, gx2_surface.cpp: a default 2D texture is
+`Tiled2DThin1`).
+
+So textures made with their texels and every DXT texture are now tiled,
+written through a linear surface and `GX2CopySurface`, as cube maps
+already were; a part of a tiled level written later, and glGenerateMipmap
+on one, go through a linear twin (copied out, changed, copied back).
+Render targets and atlases made empty stay linear. Every texture's memory
+starts zeroed, so levels never given texels read as black. Cemu draws Blood
+Gulch as before. New in the log: each of the first 24 textures' surfaces
+(tile mode, use, levels, pitch, alignment, image and mipmap addresses and
+their alignment, swizzle, offsets). New switches: `linear_textures` (the
+old linear textures), `only_tex_format=0xNN` (only that GX2 format sampled,
+the rest as nothing bound), `no_aniso`.

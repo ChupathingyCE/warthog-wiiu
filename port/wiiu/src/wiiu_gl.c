@@ -23,13 +23,20 @@ decaf-emu, src/libdecaf/src/cafe/libraries/gx2):
   Texel bytes are stored as they are (GX2's surfaces take no swap: decaf's
   gx2_format.cpp, every format's endian 0): RGBA bytes, DXT blocks as the
   Xbox has them, BGRA bytes swapped to RGBA as they are copied.
-- Textures are linear surfaces (GX2_TILE_MODE_LINEAR_ALIGNED), as SDL's
-  WIIU_SDL_CreateTexture makes them, so that the CPU writes rows at the
-  surface's pitch and a texture used as a framebuffer attachment is drawn
-  into where it is sampled from (a GX2ColorBuffer over the same memory, as
-  SDL's render targets are). Levels are where GX2CalcSurfaceSizeAndAlignment
-  puts them: level 0 at image, level 1 at mipmaps, the rest at mipmaps plus
-  mipLevelOffset[level - 1].
+- Textures made with their texels (the map's bitmaps), DXT textures, cube
+  maps and volumes are in GX2's own tiling (GX2_TILE_MODE_DEFAULT), their
+  texels written into linear surfaces and copied into place by
+  GX2CopySurface (games' textures are tiled: decaf's gx2_surface.cpp). Textures made empty (render
+  targets, atlases written a part at a time) are linear surfaces
+  (GX2_TILE_MODE_LINEAR_ALIGNED), as SDL's WIIU_SDL_CreateTexture makes
+  them, so that the CPU writes rows at the surface's pitch and a texture
+  used as a framebuffer attachment is drawn into where it is sampled from
+  (a GX2ColorBuffer over the same memory, as SDL's render targets are). The
+  console's GPU stopped at the first draw that sampled linear mipmapped and
+  DXT textures; SDL and Butter and Jelly only ever sample linear textures
+  of one level (RGBA8, or R8 and R8G8 video planes). Levels are where
+  GX2CalcSurfaceSizeAndAlignment puts them: level 0 at image, level 1 at
+  mipmaps, the rest at mipmaps plus mipLevelOffset[level - 1].
 - Buffers keep their bytes in memory the GPU reads, flushed from the CPU's
   cache after each write. The renderer appends to its stream and index
   buffers and orphans them when full, so data a queued draw reads is never
@@ -139,7 +146,8 @@ never reads the file, so every switch stays off. */
 static struct
 {
 	int loaded;
-	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes, native_shorts, no_gpu_check, unaligned_vertices, copy_vertices;
+	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes, native_shorts, no_gpu_check, unaligned_vertices, copy_vertices, linear_textures, no_aniso, only_tex;
+	unsigned int only_tex_format;
 	unsigned long log_at;
 	GLuint skip_programs[8];
 	int skip_count;
@@ -161,8 +169,13 @@ static void debug_describe(void)
 		GPU_CHECK_FRAMES, debug.no_gpu_check ? "off" : "on");
 	wiiu_log("gl: vertex buffers on GX2_VERTEX_BUFFER_ALIGNMENT %s (unaligned_vertices), every attribute copied to the "
 		"ring %s (copy_vertices)", debug.unaligned_vertices ? "off" : "on", debug.copy_vertices ? "on" : "off");
+	wiiu_log("gl: textures given texels in GX2's tiling, through GX2CopySurface %s (linear_textures)",
+		debug.linear_textures ? "off" : "on");
 	wiiu_log("gl: other switches to narrow a draw down (gl.txt, a word each): no_draws no_depth no_blend no_cull "
-		"white_textures no_mips skip_program=N log_frame=N log_draws");
+		"white_textures only_tex_format=0xNN no_aniso no_mips skip_program=N log_frame=N log_draws");
+	if (debug.only_tex)
+		wiiu_log("gl: only textures of format 0x%x sampled (only_tex_format), the rest as nothing bound",
+			debug.only_tex_format);
 }
 
 static void debug_load(void)
@@ -207,6 +220,10 @@ static void debug_load(void)
 		if (!strcmp(word, "no_gpu_check")) debug.no_gpu_check = 1;
 		if (!strcmp(word, "unaligned_vertices")) debug.unaligned_vertices = 1;
 		if (!strcmp(word, "copy_vertices")) debug.copy_vertices = 1;
+		if (!strcmp(word, "linear_textures")) debug.linear_textures = 1;
+		if (!strcmp(word, "no_aniso")) debug.no_aniso = 1;
+		if (sscanf(word, "only_tex_format=%x", &debug.only_tex_format) == 1)
+			debug.only_tex = 1;
 		sscanf(word, "log_at=%lu", &debug.log_at);
 		if (debug.skip_count < 8 && sscanf(word, "skip_program=%u", &debug.skip_programs[debug.skip_count]) == 1)
 			debug.skip_count++;
@@ -1049,9 +1066,11 @@ static void texture_component_map(struct texture *texture)
 	texture->array_view_made = 0;
 }
 
-/* (re)makes the texture's surface for this size and format */
+/* (re)makes the texture's surface for this size and format; given_texels:
+the texture is made with its texels (glTexImage with pixels), not to be
+drawn into or written a part at a time */
 static int texture_allocate(struct texture *texture, GLenum target, GLenum internal, unsigned long width,
-	unsigned long height, unsigned long depth)
+	unsigned long height, unsigned long depth, int given_texels)
 {
 	int compressed;
 	GX2SurfaceFormat format = surface_format(internal, &compressed);
@@ -1061,6 +1080,7 @@ static int texture_allocate(struct texture *texture, GLenum target, GLenum inter
 	GX2Surface *surface = &texture->gx2.surface;
 	unsigned long total;
 
+	debug_load();
 	if ((texture->memory || texture->depth_format) && texture->width == width && texture->height == height &&
 		texture->depth == depth && texture->internal_format == internal && texture->target == target)
 	{
@@ -1090,8 +1110,15 @@ static int texture_allocate(struct texture *texture, GLenum target, GLenum inter
 	surface->use = compressed ? GX2_SURFACE_USE_TEXTURE : GX2_SURFACE_USE_TEXTURE_COLOR_BUFFER_TV;
 	/* (cube maps and volumes in GX2's own tiling, as games have them: their
 	texels go in through a linear copy, texture_upload; Cemu read the
-	linear cube maps' texels as black) */
-	texture->tiled = target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_3D;
+	linear cube maps' texels as black. So are DXT textures and textures made
+	with their texels, the map's bitmaps: the console's GPU stopped at the
+	first draw that sampled them linear, mipmapped and DXT, while 1x1 linear
+	textures of one level drew fine. Linear textures on the console are as
+	SDL's and Butter and Jelly's are, one level of RGBA8, R8 or R8G8; DXT
+	and the levels below the first are only ever tiled there. Textures made
+	empty, to be drawn into or written a part at a time, stay linear.) */
+	texture->tiled = target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_3D ||
+		(!debug.linear_textures && (compressed || given_texels));
 	surface->tileMode = texture->tiled ? GX2_TILE_MODE_DEFAULT : GX2_TILE_MODE_LINEAR_ALIGNED;
 	GX2CalcSurfaceSizeAndAlignment(surface);
 	/* (level 1 is mipLevelOffset[0] after the image when the levels follow
@@ -1103,6 +1130,9 @@ static int texture_allocate(struct texture *texture, GLenum target, GLenum inter
 		wiiu_log("gl: no memory for a %lux%lux%lu texture (%lu bytes)", width, height, depth, total);
 		return 0;
 	}
+	/* (levels never given texels read as zeros, not the heap's leftovers) */
+	memset(texture->memory, 0, total);
+	gpu_written(texture->memory, total, GX2_INVALIDATE_MODE_CPU_TEXTURE);
 	texture->bytes = total;
 	surface->image = texture->memory;
 	surface->mipmaps = surface->mipLevels > 1 ? (unsigned char *)texture->memory + surface->mipLevelOffset[0] : NULL;
@@ -1113,6 +1143,23 @@ static int texture_allocate(struct texture *texture, GLenum target, GLenum inter
 	texture->levels = (int)surface->mipLevels;
 	texture_component_map(texture);
 	debug_load();
+	{
+		/* (the first textures' surfaces, as GX2CalcSurfaceSizeAndAlignment
+		made them, in every run) */
+		static int described;
+
+		if (described++ < 24)
+			wiiu_log("gl: texture %lux%lux%lu target 0x%x format 0x%x, tile mode %d (asked %s), use 0x%x, %u levels, "
+				"pitch %u, alignment 0x%x, image %u bytes at %p (0x%x past the alignment), mipmaps %u bytes at %p "
+				"(0x%x past 0x100), swizzle 0x%x, offsets %u %u %u", width, height, depth, target, (unsigned int)format,
+				(int)surface->tileMode, texture->tiled ? "default" : "linear aligned", (unsigned int)surface->use,
+				(unsigned int)surface->mipLevels, (unsigned int)surface->pitch, (unsigned int)surface->alignment,
+				(unsigned int)surface->imageSize, surface->image,
+				(unsigned int)((uintptr_t)surface->image % (surface->alignment ? surface->alignment : 1)),
+				(unsigned int)surface->mipmapSize, surface->mipmaps, (unsigned int)((uintptr_t)surface->mipmaps & 0xff),
+				(unsigned int)surface->swizzle, (unsigned int)surface->mipLevelOffset[0],
+				(unsigned int)surface->mipLevelOffset[1], (unsigned int)surface->mipLevelOffset[2]);
+	}
 	if (debug.log_textures)
 	{
 		static int logged;
@@ -1250,6 +1297,48 @@ static void texture_upload_tiled(struct texture *texture, int level, unsigned lo
 		texture->defined_levels = level + 1;
 }
 
+static void texture_flush_drawn(struct texture *texture);
+
+/* A tiled 2D texture's levels changed by the CPU (a part of a level written,
+glGenerateMipmap): its levels copied into a linear twin, the same size and
+format, by GX2CopySurface (which untiles them), changed there and copied
+back. The twin's memory is let go two frames on. */
+static int texture_twin_make(struct texture *texture, struct texture *twin, int first, int last)
+{
+	int level;
+
+	memset(twin, 0, sizeof(*twin));
+	texture_defaults(twin);
+	if (!texture_allocate(twin, GL_TEXTURE_2D, texture->internal_format, texture->width, texture->height, 1, 0) ||
+		twin->tiled)
+	{
+		texture_release(twin);
+		return 0;
+	}
+	texture_flush_drawn(texture);
+	for (level = first; level <= last && level < texture->levels; level++)
+		GX2CopySurface(&texture->gx2.surface, (uint32_t)level, 0, &twin->gx2.surface, (uint32_t)level, 0);
+	GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, twin->memory, twin->bytes);
+	gpu_done("the GPU let finish to untile a texture's levels");
+	DCInvalidateRange(twin->memory, twin->bytes);
+	twin->defined_levels = texture->defined_levels;
+	return 1;
+}
+
+static void texture_twin_commit(struct texture *texture, struct texture *twin, int first, int last)
+{
+	int level;
+
+	gpu_written(twin->memory, twin->bytes, GX2_INVALIDATE_MODE_CPU_TEXTURE);
+	for (level = first; level <= last && level < texture->levels; level++)
+		GX2CopySurface(&twin->gx2.surface, (uint32_t)level, 0, &texture->gx2.surface, (uint32_t)level, 0);
+	GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, texture->memory, texture->bytes);
+	gpu_check("a texture's levels copied back into GX2's tiling");
+	if (twin->defined_levels > texture->defined_levels)
+		texture->defined_levels = twin->defined_levels;
+	texture_release(twin);
+}
+
 /* copies texels into a level (rows of texels, or of DXT blocks), BGRA's
 swapped to the surface's RGBA */
 static void texture_upload(struct texture *texture, GLenum target, int level, unsigned long x, unsigned long y,
@@ -1296,6 +1385,22 @@ static void texture_upload(struct texture *texture, GLenum target, int level, un
 	}
 	if (texture->target == GL_TEXTURE_CUBE_MAP)
 		z = (unsigned long)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
+	if (texture->tiled && texture->target == GL_TEXTURE_2D && (x || y || width != level_size(texture->width, level) ||
+		height != level_size(texture->height, level)))
+	{
+		/* (a part of a tiled level: written in a linear twin) */
+		struct texture twin;
+
+		if (texture_twin_make(texture, &twin, level, level))
+		{
+			twin.defined_levels = 0;
+			texture_upload(&twin, target, level, x, y, z, width, height, depth, data, format);
+			twin.defined_levels = twin.defined_levels > texture->defined_levels ? twin.defined_levels :
+				texture->defined_levels;
+			texture_twin_commit(texture, &twin, level, level);
+		}
+		return;
+	}
 	if (texture->tiled)
 	{
 		texture_upload_tiled(texture, level, z, width, height, depth, data, format);
@@ -1361,7 +1466,7 @@ static void image(GLenum target, GLint level, GLint internal, GLsizei width, GLs
 		unsigned long base_width = (unsigned long)width << level, base_height = (unsigned long)height << level;
 
 		if (!texture_allocate(texture, whole, (GLenum)internal, base_width, base_height,
-			(unsigned long)(depth ? depth : 1)))
+			(unsigned long)(depth ? depth : 1), pixels != NULL))
 		{
 			return;
 		}
@@ -1382,6 +1487,18 @@ static void generate_mipmaps(struct texture *texture)
 	if (!texture->memory || texture->compressed || texture->target != GL_TEXTURE_2D || texel_bytes(texture) != 4)
 	{
 		FIRST_USE();
+		return;
+	}
+	if (texture->tiled)
+	{
+		/* (made in a linear twin, from the first level) */
+		struct texture twin;
+
+		if (texture->levels > 1 && texture_twin_make(texture, &twin, 0, 0))
+		{
+			generate_mipmaps(&twin);
+			texture_twin_commit(texture, &twin, 1, texture->levels - 1);
+		}
 		return;
 	}
 	if (texture->written)
@@ -2483,6 +2600,8 @@ static void sampler_make(GX2Sampler *made, const struct sampler_parameters *samp
 		GX2_TEX_ANISO_RATIO_4_TO_1 : sampler->anisotropy >= 2.0f ? GX2_TEX_ANISO_RATIO_2_TO_1 : GX2_TEX_ANISO_RATIO_NONE;
 	float max_lod = (float)top_level, min_lod = (float)texture->base_level;
 
+	if (debug.no_aniso)
+		aniso = GX2_TEX_ANISO_RATIO_NONE;
 	if (texture->max_level < top_level)
 		max_lod = (float)texture->max_level;
 	if (sampler->max_lod < max_lod)
@@ -2539,7 +2658,7 @@ static struct texture *empty_texture(int slot)
 		return NULL;
 	texture_defaults(texture);
 	if (!texture_allocate(texture, slot == 1 ? GL_TEXTURE_3D : slot == 2 ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D,
-		GL_RGBA8, 1, 1, 1))
+		GL_RGBA8, 1, 1, 1, 0))
 	{
 		free(texture);
 		return NULL;
@@ -2620,6 +2739,8 @@ static int prepare_draw(void)
 		if (!uniform->sampler || uniform->sampler_location < 0)
 			continue;
 		texture = debug.white_textures ? NULL : unit_texture(uniform->unit, uniform->sampler_slot);
+		if (texture && debug.only_tex && (unsigned int)texture->gx2.surface.format != debug.only_tex_format)
+			texture = NULL;
 		if (texture == gl.target_texture && texture)
 			texture = NULL;
 		if (!texture)
@@ -3980,8 +4101,8 @@ static void cube_probe_run(void)
 	texture_defaults(cube);
 	texture_defaults(row);
 	pixel = internal_shader(GL_FRAGMENT_SHADER, probe_pixel_source);
-	if (!pixel || !texture_allocate(cube, GL_TEXTURE_CUBE_MAP, GL_RGBA8, 4, 4, 1) ||
-		!texture_allocate(row, GL_TEXTURE_2D, GL_RGBA8, 48, 1, 1))
+	if (!pixel || !texture_allocate(cube, GL_TEXTURE_CUBE_MAP, GL_RGBA8, 4, 4, 1, 0) ||
+		!texture_allocate(row, GL_TEXTURE_2D, GL_RGBA8, 48, 1, 1, 0))
 	{
 		wiiu_log("gl: cube probe: not made");
 		return;
