@@ -85,3 +85,49 @@ took the 256 MB window, wrote its settings, and stopped at the cache file
 setup (the seek past the end above), then at the renderer's missing device.
 
 **Next.** The same on the console; then milestone 3, the renderer.
+
+## Milestone 3: the renderer draws (2026-10-22)
+
+**Works, in Cemu.** The game's own renderer (the game's
+`port/linux/src/d3d8_gl.c`, unchanged) draws through an OpenGL layer over
+GX2, `src/wiiu_gl.c`, arranged as the Xbox 360's `x360_gl.c` over Direct3D
+9. The main menu draws whole (the ring, the planet, the stars, the menus),
+and Blood Gulch loads and draws: the level, the sky, the first-person
+weapon and the HUD. Screenshots: `showcase/wiiu-night/` (owner's work
+folder), `*-menu4.png` and `*-bg1.png`.
+
+How it is put together (the file's comment has the details):
+
+- Shaders: the GLSL `d3d8_gl.c` makes, compiled one by one by CafeGLSL in
+  register mode, as the game asks for them. The varyings are given
+  locations by name before they are compiled, so any vertex shader goes
+  with any fragment shader (Latte matches them by semantic, which CafeGLSL
+  makes from the location). Each vertex shader's depth is made OpenGL's as
+  it ends (z' = 2z - w): GX2's viewport puts y = 1 on the first row, as
+  Direct3D does, but its depth is OpenGL's (decaf's GX2SetViewport).
+- Uniforms: CafeGLSL lists an array's elements on their own ("c[1]" after
+  "c" and "c[0]"); an array is taken from its first. Values are set with
+  GX2SetVertexUniformReg and GX2SetPixelUniformReg, all of a program's when
+  it is newly in use, else the range written since.
+- Textures are linear surfaces, drawn into where they are sampled (SDL's
+  Wii U render targets), BGRA texels swapped to RGBA as they are copied,
+  DXT blocks as they are (GX2's surfaces take no byte swap). Depth
+  attachments are GX2 depth buffers of their own.
+- Vertices: the map's (the Xbox window, which `d3d8_gl.c` aliases with
+  `console_gl_buffer_alias` under `HALO_CONSOLE_GL_LAYER`) are fetched
+  without a byte swap, the CPU's with the swap of their element's size.
+  Attributes not on a word are copied, as on the 360. Fetch shaders are
+  made per layout and kept.
+- Culling: in Cemu a strip's triangles came out wound the other way from a
+  list's or a fan's, so strips and fans are drawn as lists in GL's order.
+  To compare on the console: the bring-up switch `native_strips`.
+- Cemu decodes no single 16-bit attribute: one short is fetched as two.
+
+Bring-up switches (`--wiiu-gl-switches` at configure, then words in
+`sd:/wiiu/apps/halo/gl.txt`): `log_draws`, `log_frame=N`, `no_draws`,
+`no_cull`, `no_depth`, `no_blend`, `swap_winding`, `native_strips`,
+`white_textures`, `clear_red`, `trace`.
+
+**Not yet.** Blood Gulch's ground is too dark near the camera (next to
+look at). Shaders are compiled every run (no cache on the SD card yet).
+Scissored depth clears, MSAA, glReadPixels.
