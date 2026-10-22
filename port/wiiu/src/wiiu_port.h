@@ -41,6 +41,10 @@ typedef void (*wiiu_audio_fill)(void *context, void *buffer, int length);
 int wiiu_audio_open(int rate, wiiu_audio_fill fill, void *context);
 void wiiu_audio_resume(void);
 void wiiu_audio_close(void);
+/* AX itself, started with ProcUI (the Wii U Menu's music stops with it) and
+stopped when the foreground is released and at the end */
+void wiiu_audio_startup(void);
+void wiiu_audio_shutdown(void);
 
 /* the TV's picture (wiiu_video.c) */
 #define WIIU_SCREEN_WIDTH 1280
@@ -51,6 +55,7 @@ void wiiu_video_swap(void);
 /* the system's messages (wiiu_proc.c): 0 once the game is to end */
 int wiiu_proc_update(void);
 void wiiu_proc_request_quit(void);
+void wiiu_proc_poll(void);
 
 /* the controllers (wiiu_pad.c): the GamePad, then the Wii Remotes' Pro and
 Classic Controllers, in the game's four ports, as the Xbox's gamepad state

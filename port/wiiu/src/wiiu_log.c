@@ -105,6 +105,7 @@ static ssize_t log_devoptab_write(struct _reent *reent, void *file, const char *
 	OSLockMutex(&log_mutex);
 	log_write(text, length);
 	OSUnlockMutex(&log_mutex);
+	wiiu_proc_poll();
 	return (ssize_t)length;
 }
 
@@ -125,6 +126,7 @@ void wiiu_log_v(const char *format, va_list arguments)
 	OSLockMutex(&log_mutex);
 	log_line(line);
 	OSUnlockMutex(&log_mutex);
+	wiiu_proc_poll();
 }
 
 void wiiu_log(const char *format, ...)

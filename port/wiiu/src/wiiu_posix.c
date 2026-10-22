@@ -33,6 +33,8 @@ int clock_nanosleep(clockid_t clock, int flags, const struct timespec *request, 
 		nanoseconds -= (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
 	}
 	if (nanoseconds > 0)
+		wiiu_proc_poll();
+	if (nanoseconds > 0)
 		OSSleepTicks(OSNanosecondsToTicks(nanoseconds));
 	return 0;
 }
@@ -102,6 +104,7 @@ read under one lock (the SD card's files have no positional calls) */
 
 static OSMutex positional_mutex;
 static int positional_ready;
+static off_t lseek_padded(int descriptor, off_t offset, int whence);
 
 /* (made the first time, by whichever thread comes first: another waits for
 it to be made) */
@@ -127,9 +130,10 @@ ssize_t pread(int descriptor, void *buffer, size_t count, off_t offset)
 	off_t previous;
 	ssize_t result = -1;
 
+	wiiu_proc_poll();
 	positional_lock();
 	previous = lseek(descriptor, 0, SEEK_CUR);
-	if (previous != (off_t)-1 && lseek(descriptor, offset, SEEK_SET) != (off_t)-1)
+	if (previous != (off_t)-1 && lseek_padded(descriptor, offset, SEEK_SET) != (off_t)-1)
 	{
 		result = read(descriptor, buffer, count);
 		lseek(descriptor, previous, SEEK_SET);
@@ -145,7 +149,7 @@ ssize_t pwrite(int descriptor, const void *buffer, size_t count, off_t offset)
 
 	positional_lock();
 	previous = lseek(descriptor, 0, SEEK_CUR);
-	if (previous != (off_t)-1 && lseek(descriptor, offset, SEEK_SET) != (off_t)-1)
+	if (previous != (off_t)-1 && lseek_padded(descriptor, offset, SEEK_SET) != (off_t)-1)
 	{
 		result = write(descriptor, buffer, count);
 		lseek(descriptor, previous, SEEK_SET);
@@ -429,6 +433,26 @@ void *platform_thread_local(void **key, unsigned long size)
 	return table[number - 1];
 }
 
+/* ---------- seeks not made (see ftruncate): a seek far past a file's end is
+only remembered, per descriptor, until the SetEndOfFile that follows it or a
+use of the file that needs the zeros in place */
+
+#define SEEK_PENDING_FILES 256
+#define SEEK_LAZY_MINIMUM (1 << 20)
+
+static off_t seek_pending[SEEK_PENDING_FILES];
+
+static int seek_pending_is(int descriptor, off_t length)
+{
+	return descriptor >= 0 && descriptor < SEEK_PENDING_FILES && seek_pending[descriptor] && seek_pending[descriptor] == length;
+}
+
+static void seek_pending_clear(int descriptor)
+{
+	if (descriptor >= 0 && descriptor < SEEK_PENDING_FILES)
+		seek_pending[descriptor] = 0;
+}
+
 /* ---------- a file's length (posix_files.c's SetEndOfFile): a file made
 longer by writing zeros at its end, which every file system takes (Cemu's
 SD card makes a file only shorter); made shorter as the C library does */
@@ -464,11 +488,21 @@ int ftruncate(int descriptor, off_t length)
 		return 0;
 	if (length < status.st_size)
 		return device_truncate(descriptor, length);
+	/* (the file was just given its length by a seek that was not made: the
+	cache files, made at 278 MB, are not written out with zeros, which on
+	the SD card took minutes and held the game's start; the file grows as it
+	is written, and reads where nothing was written are not asked for) */
+	if (seek_pending_is(descriptor, length))
+	{
+		seek_pending_clear(descriptor);
+		wiiu_log("files: length %lld not written out (grows as written)", (long long)length);
+		return 0;
+	}
 	position = lseek(descriptor, 0, SEEK_CUR);
-	if (position == (off_t)-1 || lseek(descriptor, 0, SEEK_END) == (off_t)-1)
+	if (position == (off_t)-1 || lseek_padded(descriptor, 0, SEEK_END) == (off_t)-1)
 		return -1;
 	{
-		static const char zeros[4096];
+		static const char zeros[16384];
 		off_t remaining = length - status.st_size;
 
 		while (remaining > 0)
@@ -477,13 +511,14 @@ int ftruncate(int descriptor, off_t length)
 
 			if (written <= 0)
 			{
-				lseek(descriptor, position, SEEK_SET);
+				lseek_padded(descriptor, position, SEEK_SET);
 				return -1;
 			}
 			remaining -= written;
+			wiiu_proc_poll();
 		}
 	}
-	return lseek(descriptor, position, SEEK_SET) == (off_t)-1 ? -1 : 0;
+	return lseek_padded(descriptor, position, SEEK_SET) == (off_t)-1 ? -1 : 0;
 }
 
 /* ---------- a seek past a file's end (SetFilePointer before SetEndOfFile:
@@ -503,7 +538,7 @@ static ssize_t device_write(__handle *handle, const void *buffer, size_t count)
 	return devoptab_list[handle->device]->write_r(_REENT, handle->fileStruct, buffer, count);
 }
 
-off_t lseek(int descriptor, off_t offset, int whence)
+static off_t lseek_padded(int descriptor, off_t offset, int whence)
 {
 	__handle *handle = __get_handle(descriptor);
 	off_t target, end;
@@ -513,6 +548,7 @@ off_t lseek(int descriptor, off_t offset, int whence)
 		errno = EBADF;
 		return (off_t)-1;
 	}
+	seek_pending_clear(descriptor);
 	if (whence == SEEK_SET)
 		target = offset;
 	else if (whence == SEEK_CUR)
@@ -534,6 +570,9 @@ off_t lseek(int descriptor, off_t offset, int whence)
 		static const char zeros[16384];
 		off_t remaining = target - end;
 
+		if (remaining >= SEEK_LAZY_MINIMUM)
+			wiiu_log("files: writing %lld bytes of zeros to reach a position", (long long)remaining);
+
 		while (remaining > 0)
 		{
 			ssize_t written = device_write(handle, zeros,
@@ -542,9 +581,38 @@ off_t lseek(int descriptor, off_t offset, int whence)
 			if (written <= 0)
 				return (off_t)-1;
 			remaining -= written;
+			wiiu_proc_poll();
 		}
 	}
 	return device_seek(handle, target, SEEK_SET);
+}
+
+/* (a seek far past the end is remembered, not made, for the file's
+SetEndOfFile; the position asked for stays what the file's position is) */
+off_t lseek(int descriptor, off_t offset, int whence)
+{
+	__handle *handle = __get_handle(descriptor);
+
+	if (handle && descriptor < SEEK_PENDING_FILES)
+	{
+		if (whence == SEEK_CUR && seek_pending[descriptor])
+		{
+			if (offset == 0)
+				return seek_pending[descriptor];
+		}
+		else if (whence == SEEK_SET && offset >= 0)
+		{
+			off_t end = device_seek(handle, 0, SEEK_END);
+
+			if (end != (off_t)-1 && offset - end >= SEEK_LAZY_MINIMUM)
+			{
+				device_seek(handle, end, SEEK_SET);
+				seek_pending[descriptor] = offset;
+				return offset;
+			}
+		}
+	}
+	return lseek_padded(descriptor, offset, whence);
 }
 
 /* ---------- opening a file (CreateFileA's flags): the SD card's device
@@ -583,5 +651,13 @@ int open(const char *path, int flags, ...)
 		flags |= O_CREAT;
 		mode = 0644;
 	}
-	return _open_r(_REENT, path, flags, mode);
+	{
+		int descriptor = _open_r(_REENT, path, flags, mode);
+
+		if (flags & (O_CREAT | O_TRUNC))
+			wiiu_log("files: made %s (%d)", path, descriptor);
+
+		seek_pending_clear(descriptor);
+		return descriptor;
+	}
 }
