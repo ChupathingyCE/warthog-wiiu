@@ -27,13 +27,19 @@ static unsigned int buffer_sizes[2];
 static char lines[SCREEN_LINES][SCREEN_COLUMNS + 1];
 static int line_count;
 
+/* the room given each screen's buffers: Cemu's OSScreen draws the GamePad's
+text past the size it gives for its buffers (it wrote over the heap's next
+blocks, the cache file thread's event among them), so each has the TV's
+size and a megabyte more */
+#define SCREEN_BUFFER_ROOM(size) ((size) > 0x708000u ? (size) + 0x100000u : 0x808000u)
+
 static void screen_start(void)
 {
 	OSScreenInit();
 	buffer_sizes[0] = OSScreenGetBufferSizeEx(SCREEN_TV);
 	buffer_sizes[1] = OSScreenGetBufferSizeEx(SCREEN_DRC);
-	buffers[0] = MEMAllocFromDefaultHeapEx(buffer_sizes[0], 0x100);
-	buffers[1] = MEMAllocFromDefaultHeapEx(buffer_sizes[1], 0x100);
+	buffers[0] = MEMAllocFromDefaultHeapEx(SCREEN_BUFFER_ROOM(buffer_sizes[0]), 0x100);
+	buffers[1] = MEMAllocFromDefaultHeapEx(SCREEN_BUFFER_ROOM(buffer_sizes[1]), 0x100);
 	if (!buffers[0] || !buffers[1])
 	{
 		screen_state = -1;

@@ -103,10 +103,22 @@ read under one lock (the SD card's files have no positional calls) */
 static OSMutex positional_mutex;
 static int positional_ready;
 
+/* (made the first time, by whichever thread comes first: another waits for
+it to be made) */
 static void positional_lock(void)
 {
-	if (!__atomic_exchange_n(&positional_ready, 1, __ATOMIC_ACQ_REL))
-		OSInitMutex(&positional_mutex);
+	int expected = 0;
+
+	if (__atomic_load_n(&positional_ready, __ATOMIC_ACQUIRE) != 2)
+	{
+		if (__atomic_compare_exchange_n(&positional_ready, &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+		{
+			OSInitMutex(&positional_mutex);
+			__atomic_store_n(&positional_ready, 2, __ATOMIC_RELEASE);
+		}
+		while (__atomic_load_n(&positional_ready, __ATOMIC_ACQUIRE) != 2)
+			OSYieldThread();
+	}
 	OSLockMutex(&positional_mutex);
 }
 
@@ -435,6 +447,9 @@ static int device_truncate(int descriptor, off_t length)
 		errno = EINVAL;
 		return -1;
 	}
+	/* (the device's data in the call's reent, as the C library's own calls
+	set it: wut's SD card device reads it) */
+	_REENT->deviceData = devoptab_list[handle->device]->deviceData;
 	return devoptab_list[handle->device]->ftruncate_r(_REENT, handle->fileStruct, length);
 }
 
@@ -469,4 +484,104 @@ int ftruncate(int descriptor, off_t length)
 		}
 	}
 	return lseek(descriptor, position, SEEK_SET) == (off_t)-1 ? -1 : 0;
+}
+
+/* ---------- a seek past a file's end (SetFilePointer before SetEndOfFile:
+the game's cache files are made at their full size that way): the SD card's
+file system will not place a file's position past its end, so the file is
+made that long first, with zeros, as a POSIX file reads there */
+
+static off_t device_seek(__handle *handle, off_t offset, int whence)
+{
+	_REENT->deviceData = devoptab_list[handle->device]->deviceData;
+	return devoptab_list[handle->device]->seek_r(_REENT, handle->fileStruct, offset, whence);
+}
+
+static ssize_t device_write(__handle *handle, const void *buffer, size_t count)
+{
+	_REENT->deviceData = devoptab_list[handle->device]->deviceData;
+	return devoptab_list[handle->device]->write_r(_REENT, handle->fileStruct, buffer, count);
+}
+
+off_t lseek(int descriptor, off_t offset, int whence)
+{
+	__handle *handle = __get_handle(descriptor);
+	off_t target, end;
+
+	if (!handle || !devoptab_list[handle->device]->seek_r)
+	{
+		errno = EBADF;
+		return (off_t)-1;
+	}
+	if (whence == SEEK_SET)
+		target = offset;
+	else if (whence == SEEK_CUR)
+	{
+		off_t current = device_seek(handle, 0, SEEK_CUR);
+
+		if (current == (off_t)-1)
+			return current;
+		target = current + offset;
+	}
+	else
+	{
+		return device_seek(handle, offset, whence);
+	}
+	end = device_seek(handle, 0, SEEK_END);
+	if (end == (off_t)-1 || target <= end || !devoptab_list[handle->device]->write_r)
+		return device_seek(handle, target, SEEK_SET);
+	{
+		static const char zeros[16384];
+		off_t remaining = target - end;
+
+		while (remaining > 0)
+		{
+			ssize_t written = device_write(handle, zeros,
+				remaining < (off_t)sizeof(zeros) ? (size_t)remaining : sizeof(zeros));
+
+			if (written <= 0)
+				return (off_t)-1;
+			remaining -= written;
+		}
+	}
+	return device_seek(handle, target, SEEK_SET);
+}
+
+/* ---------- opening a file (CreateFileA's flags): the SD card's device
+(wut's) takes only the flags a C library's fopen modes make, and refuses the
+rest. The others the platform layer asks for are given as the nearest the
+device takes: writing a file that is there (OPEN_EXISTING) as reading and
+writing it ("r+", which also needs it to be there), and emptying a file that
+is there (TRUNCATE_EXISTING) as making it new ("w+"), only once it is known
+to be there */
+
+#include <fcntl.h>
+#include <stdarg.h>
+
+int open(const char *path, int flags, ...)
+{
+	int mode = 0;
+	int access = flags & O_ACCMODE;
+	int common = flags & (O_CREAT | O_TRUNC | O_APPEND);
+
+	if (flags & O_CREAT)
+	{
+		va_list arguments;
+
+		va_start(arguments, flags);
+		mode = va_arg(arguments, int);
+		va_end(arguments);
+	}
+	if (access == O_WRONLY && !common)
+		flags = (flags & ~O_ACCMODE) | O_RDWR;
+	else if (access == O_RDWR && common == O_TRUNC)
+	{
+		struct stat status;
+
+		if (stat(path, &status) != 0)
+			return -1;
+		flags |= O_CREAT;
+		mode = 0644;
+	}
+	return _open_r(_REENT, path, flags, mode);
 }

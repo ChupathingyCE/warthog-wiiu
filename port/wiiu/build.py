@@ -36,6 +36,7 @@ LINUX_INCLUDE = Path("port/linux/include")
 LINUX_SRC = Path("port/linux/src")
 LINUX_GAME = Path("port/linux/game")
 CONSOLE_INCLUDE = Path("port/console/include")
+CONSOLE_GAME = Path("port/console/game")
 TOML_DIR = Path("port/third_party/tomlc17")
 EXPAT_DIR = Path("port/third_party/expat")
 EXPAT_SOURCES = ("xmlparse.c", "xmlrole.c", "xmltok.c")
@@ -63,7 +64,7 @@ TARGET_FLAGS = [
     "-DHALO_WIIU_CONSOLE",
     "-DHALO_BIG_ENDIAN",
     "-O2",
-    "-g1",
+    "-g",
     # (no temporary assembly files: the generated HUD source is large)
     "-pipe",
 ]
@@ -218,7 +219,7 @@ def add_arguments(parser: Any) -> None:
 def configure_inputs(port: ConsolePort) -> List[Path]:
     """Files whose change must re-run configure.py."""
     return [port.path("src"), port.path("platform"), port.path("include"), port.path("build.py"),
-            port.game_path(LINUX_SRC), port.game_path(LINUX_GAME), port.game_path("port", "linux", "port.json")]
+            port.game_path(LINUX_SRC), port.game_path(LINUX_GAME), port.game_path(CONSOLE_GAME), port.game_path("port", "linux", "port.json")]
 
 
 def _missing(n: Writer, text: str) -> None:
@@ -353,6 +354,7 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
         f"-iquote {_quote(game)}",
         f"-I{_quote(port_dir / 'include')}",
         f"-I{_quote(game / LINUX_INCLUDE)}",
+        f"-I{_quote(game / CONSOLE_INCLUDE)}",
         # the headers of the port's own game units, for the game sources that
         # call them
         f"-iquote {_quote(game / LINUX_GAME)}",
@@ -363,6 +365,11 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
         add_object(source, " ".join([game_cflags, *flags]), [semantics_header])
     for source in sorted((game / LINUX_GAME).glob("*.c")):
         add_object(source, game_cflags, [semantics_header])
+    # a big-endian console's byte swap of the maps' headers and tags
+    # (port/console/game, which source/cache/cache_files.c calls with
+    # HALO_BIG_ENDIAN)
+    for source in sorted((game / CONSOLE_GAME).glob("*.c")):
+        add_object(source, f"{game_cflags} -I{_quote(game / CONSOLE_INCLUDE)}", [semantics_header])
 
     platform_cflags = " ".join([
         abi,

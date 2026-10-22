@@ -42,3 +42,46 @@ big-endian fixes (tag swap tables, scripts' narrow compares) arrive with the
 game's x360-shared PR, and the Wii U takes them from there.
 
 **Next.** Milestone 2: boot in Cemu, log, reach the main loop.
+
+## Milestone 2: the maps load (2026-10-21)
+
+**Works, in Cemu.** The game boots, copies ui.map into its cache file,
+reads and byte-swaps its tags (980 of 983; the two `metr` tags have no
+layout yet and are left as they are), adds the menus' tags, loads the main
+menu's structure bsp and reaches the main menu, its music started. With
+`d:\init.txt` holding `map_name levels\test\bloodgulch\bloodgulch` it loads
+Blood Gulch instead (1803 of 1806 tags, its bsp's 380 blocks) and the game
+ticks. Still no picture, no sound.
+
+What it took:
+
+- The big-endian map reading is the shared code's (game PR #402, in through
+  #403): `build.py` compiles `port/console/game`, the byte swap of the
+  maps' headers, tags and bsps, which `HALO_BIG_ENDIAN` turns on.
+- The log on the screens: Cemu's OSScreen draws the GamePad's text past the
+  buffer size it reports, over the heap's next blocks (the cache file
+  thread's event among them, so the first read of the tags never woke the
+  thread). Each screen buffer now has the TV's size and a megabyte more.
+- The SD card's files (wut's device): an `open` that maps CreateFileA's
+  flags onto the ones the device takes (write-only without create, as on
+  OPEN_EXISTING, was refused, so no profile or playlist could be written),
+  a seek past a file's end made by writing zeros first (the console's
+  file system will not place a position past the end: the hardware run
+  stopped at "setup for new cache file failed (#87)"), and the device's
+  data set for the device calls the port makes itself.
+- Game PR #403: the data arrays' "is it whole" checks compared the
+  elements' pointer with their Xbox address, which differ when the window
+  is moved, so the lights were let go every tick.
+
+**Cemu's recompiler.** In Cemu's default (recompiler) mode the game halts in
+the menus' tags (`csmemcpy`, "destination && source"): a `mfcr`/`mtcrf`
+pair that saves a compare across a call reads back the wrong result, and
+code behind an `if (count)` runs with a count of 0. With
+`--force-interpreter` the same build runs on. Real hardware is the
+reference; Cemu runs are interpreter runs for now.
+
+**First hardware run** (the owner's console, before these fixes): booted,
+took the 256 MB window, wrote its settings, and stopped at the cache file
+setup (the seek past the end above), then at the renderer's missing device.
+
+**Next.** The same on the console; then milestone 3, the renderer.
