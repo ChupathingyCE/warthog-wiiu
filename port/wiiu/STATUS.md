@@ -163,7 +163,9 @@ Hardware: everything above.
 Wii U as on the desktop (`platform/wiiu_input.c`), over the first
 controller's state, so the menus can be driven without a hand on a
 controller: in Cemu, `menu:` presses moved the main menu to MULTIPLAYER and
-A on CAMPAIGN opened the new profile's name screen. Presses are held for
+A on CAMPAIGN opened the new profile's name screen; in Blood Gulch,
+`bot:1` walked, turned, fired and threw grenades (the explosions and the
+HUD's messages drawn). Presses are held for
 600 ms of their second (a frame takes about 300 ms in Cemu's interpreter).
 The GamePad and Pro Controller themselves (`src/wiiu_pad.c`) are not tested:
 Cemu's emulated controllers take the host's input, which an overnight run
