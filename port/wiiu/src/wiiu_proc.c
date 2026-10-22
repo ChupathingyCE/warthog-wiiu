@@ -27,34 +27,6 @@ static OSThread *proc_thread;
 static OSTime proc_last_service;
 static ProcUIStatus proc_status;
 
-/* Every thread but this one stopped (and the other cores' own threads
-left alone), so that the system's exit has nothing live to wait on: the
-game's cache, network and mixer threads end with the game, as SDL's
-Wii U audio joins its own before ProcUI is shut down. The log's lock is held
-meanwhile, so that no stopped thread keeps it. */
-static int proc_stop_threads(void)
-{
-	OSThread *self = OSGetCurrentThread();
-	OSThread *thread = self;
-	OSThread *list[64];
-	int count = 0, index, step;
-
-	wiiu_log_lock();
-	for (step = 0; step < 64 && thread->activeLink.prev; step++)
-		thread = (OSThread *)thread->activeLink.prev;
-	for (step = 0; thread && step < 64; step++)
-	{
-		if (thread != self && thread != OSGetDefaultThread(0) && thread != OSGetDefaultThread(1) &&
-			thread != OSGetDefaultThread(2) && count < 64)
-			list[count++] = thread;
-		thread = (OSThread *)thread->activeLink.next;
-	}
-	for (index = 0; index < count; index++)
-		OSSuspendThread(list[index]);
-	wiiu_log_unlock();
-	return count;
-}
-
 /* The game's end, however it comes (its Quit, a failed assertion's halt):
 an application ends when ProcUI says so, never by itself, or the console
 waits on it forever. The order is SDL's Wii U port: the audio stopped
@@ -64,8 +36,6 @@ ProcUI says to exit, the screens let go, ProcUIShutdown last. Every step is
 logged and flushed before the next, for the one that does not return. */
 static void proc_end(void)
 {
-	int stopped;
-
 	wiiu_log("system: the game ended");
 	wiiu_log_flush();
 	wiiu_audio_shutdown();
@@ -97,8 +67,7 @@ static void proc_end(void)
 	ProcUIShutdown();
 	wiiu_log("system: ProcUI shut down");
 	wiiu_log_flush();
-	stopped = proc_stop_threads();
-	wiiu_log("system: %d other threads stopped, leaving the game to the system", stopped);
+	wiiu_log("system: the game's end, to the system's exit");
 	wiiu_log_flush();
 }
 
