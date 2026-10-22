@@ -27,17 +27,54 @@ static OSThread *proc_thread;
 static OSTime proc_last_service;
 static ProcUIStatus proc_status;
 
+/* Every thread but this one stopped (and the other cores' own threads
+left alone), so that the system's exit has nothing live to wait on: the
+game's cache, network and mixer threads end with the game, as SDL's
+Wii U audio joins its own before ProcUI is shut down. The log's lock is held
+meanwhile, so that no stopped thread keeps it. */
+static int proc_stop_threads(void)
+{
+	OSThread *self = OSGetCurrentThread();
+	OSThread *thread = self;
+	OSThread *list[64];
+	int count = 0, index, step;
+
+	wiiu_log_lock();
+	for (step = 0; step < 64 && thread->activeLink.prev; step++)
+		thread = (OSThread *)thread->activeLink.prev;
+	for (step = 0; thread && step < 64; step++)
+	{
+		if (thread != self && thread != OSGetDefaultThread(0) && thread != OSGetDefaultThread(1) &&
+			thread != OSGetDefaultThread(2) && count < 64)
+			list[count++] = thread;
+		thread = (OSThread *)thread->activeLink.next;
+	}
+	for (index = 0; index < count; index++)
+		OSSuspendThread(list[index]);
+	wiiu_log_unlock();
+	return count;
+}
+
 /* The game's end, however it comes (its Quit, a failed assertion's halt):
 an application ends when ProcUI says so, never by itself, or the console
-waits on it forever. Asked for here if the system has not asked yet. */
+waits on it forever. The order is SDL's Wii U port: the audio stopped
+first (SDL_AudioQuit), then the video's quit (WIIU_VideoQuit): the Wii U
+Menu asked for if the system has not asked yet and the messages taken until
+ProcUI says to exit, the screens let go, ProcUIShutdown last. Every step is
+logged and flushed before the next, for the one that does not return. */
 static void proc_end(void)
 {
+	int stopped;
+
 	wiiu_log("system: the game ended");
+	wiiu_log_flush();
+	wiiu_audio_shutdown();
 	wiiu_log_flush();
 	if (!proc_exiting)
 	{
-		if (!quit_requested)
-			SYSLaunchMenu();
+		wiiu_log("system: asking for the Wii U Menu");
+		wiiu_log_flush();
+		SYSLaunchMenu();
 		for (;;)
 		{
 			ProcUIStatus status = ProcUIProcessMessages(TRUE);
@@ -47,10 +84,22 @@ static void proc_end(void)
 			if (status == PROCUI_STATUS_RELEASE_FOREGROUND)
 				ProcUIDrawDoneRelease();
 		}
+		proc_exiting = 1;
+		wiiu_log("system: ProcUI says to exit");
+		wiiu_log_flush();
 	}
 	wiiu_log_hold(0);
-	wiiu_audio_shutdown();
+	wiiu_screen_stop();
+	wiiu_log("system: the screens let go");
+	wiiu_log_flush();
+	wiiu_log("system: ProcUIShutdown next");
+	wiiu_log_flush();
 	ProcUIShutdown();
+	wiiu_log("system: ProcUI shut down");
+	wiiu_log_flush();
+	stopped = proc_stop_threads();
+	wiiu_log("system: %d other threads stopped, leaving the game to the system", stopped);
+	wiiu_log_flush();
 }
 
 /* The foreground's resources, let go and taken again where ProcUI says so
@@ -111,11 +160,13 @@ static void proc_initialize(void)
 
 void wiiu_proc_request_quit(void)
 {
+	/* (the end is taken at the next frame's update, on the thread that
+	owns ProcUI, which asks the system for the Wii U Menu as SDL's quit
+	does: proc_end) */
 	if (!quit_requested)
 	{
 		quit_requested = 1;
 		wiiu_log("system: quitting to the Wii U Menu");
-		SYSLaunchMenu();
 	}
 }
 
@@ -152,6 +203,8 @@ int wiiu_proc_update(void)
 	int status;
 
 	proc_initialize();
+	if (quit_requested)
+		return 0;
 	wiiu_screen_update();
 	proc_last_service = OSGetSystemTime();
 	proc_in_service = 1;
@@ -219,7 +272,6 @@ void wiiu_proc_poll(void)
 		wiiu_log("system: asked to end while loading");
 		wiiu_log_flush();
 		proc_exiting = 1;
-		ProcUIShutdown();
 		exit(EXIT_SUCCESS);
 	}
 	proc_in_service = 0;
