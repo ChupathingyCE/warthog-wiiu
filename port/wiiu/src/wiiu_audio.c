@@ -418,7 +418,8 @@ int wiiu_audio_open(int rate, wiiu_audio_fill fill, void *context)
 	OSSetThreadName(audio.thread, "Chupathingy audio");
 	OSSetThreadDeallocator(audio.thread, thread_deallocate);
 	OSResumeThread(audio.thread);
-	wiiu_log("audio: %d Hz float stereo on two AX voices, buffers of %d samples", rate, AUDIO_SAMPLES);
+	wiiu_log("audio: %d Hz float stereo on two AX voices (AX renders %d Hz, %d samples a frame), buffers of %d samples",
+		rate, (int)AXGetInputSamplesPerSec(), (int)AXGetInputSamplesPerFrame(), AUDIO_SAMPLES);
 	return 1;
 }
 

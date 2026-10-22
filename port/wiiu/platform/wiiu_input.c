@@ -146,8 +146,9 @@ As xinput_sdl.c gives it on the desktop, with the same settings, for the
 automated tests and for testing the menus without a hand on a controller
 (Cemu overnight): "menu:<buttons>" presses the buttons one a second, from
 the first poll (a, b, x, y, lb and rb the white and black buttons, up,
-down, left, right, start, back, or wait for none), each for the first 150 ms
-of its second; "bot:<seed>" is a scripted player that walks and strafes in
+down, left, right, start, back, or wait for none), each for the first 600 ms
+of its second (the desktop's 150 ms fall between two frames in Cemu's
+interpreter); "bot:<seed>" is a scripted player that walks and strafes in
 circles, turns, fires every few seconds, jumps now and then and throws a
 grenade every seven seconds; "look:<seed>" stands still, turning and
 looking up and down. Over whatever the controller itself gives. */
@@ -174,7 +175,7 @@ static const char *test_input_menu_token(size_t *length)
 	DWORD step = elapsed / 1000;
 	const char *token = test_input_menu;
 
-	if (!test_input_menu[0] || elapsed % 1000 >= 150)
+	if (!test_input_menu[0] || elapsed % 1000 >= 600)
 		return NULL;
 	for (;;)
 	{
