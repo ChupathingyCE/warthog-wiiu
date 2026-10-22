@@ -9,6 +9,7 @@ default framebuffer is, and the context state that GX2's clears leave unset.
 #ifndef __WIIU_GX2_H
 #define __WIIU_GX2_H
 
+#include <coreinit/time.h>
 #include <gx2/context.h>
 #include <gx2/surface.h>
 
@@ -19,6 +20,9 @@ GX2DepthBuffer *wiiu_video_screen_depth(void);
 GX2ContextState *wiiu_video_context_state(void);
 /* nonzero while the game has the foreground and GX2 can draw */
 int wiiu_video_drawing(void);
+/* the time spent waiting for the last frame's flip, and the waits that gave
+up, since the last call (the renderer's frame lines in the log) */
+void wiiu_video_take_waits(OSTime *time, unsigned long *timeouts);
 
 /* the end of a frame, after its swap (wiiu_gl.c): what the GPU is done with
 let go */
@@ -26,5 +30,8 @@ void wiiu_gl_frame_end(void);
 /* nonzero once the renderer has drawn a frame: the screens are no longer
 cleared for it (wiiu_video_idle) */
 int wiiu_gl_drawing(void);
+/* where the game's thread is, for the renderer's watch thread (wiiu_gl.c):
+a string that lives as long as the program */
+void wiiu_gl_step(const char *step);
 
 #endif

@@ -63,6 +63,7 @@ the first time.
 #include <string.h>
 
 #include <coreinit/cache.h>
+#include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <gx2/clear.h>
 #include <gx2/context.h>
@@ -106,6 +107,10 @@ void GX2QueryBegin(uint32_t type, wiiu_query_data *data);
 void GX2QueryEnd(uint32_t type, wiiu_query_data *data);
 BOOL GX2QueryGetOcclusionResult(wiiu_query_data *data, uint64_t *result);
 void GX2SetPixelSamplerBorderColor(uint32_t unit, float red, float green, float blue, float alpha);
+/* (gx2.def's exports; decaf's gx2_state.cpp: in milliseconds, 10 s after
+GX2Init) */
+uint32_t GX2GetGPUTimeout(void);
+void GX2SetGPUTimeout(uint32_t milliseconds);
 
 #define FIRST_USE() first_use(__func__)
 
@@ -133,12 +138,27 @@ never reads the file, so every switch stays off. */
 static struct
 {
 	int loaded;
-	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes;
+	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes, native_shorts, no_gpu_check;
 	unsigned long log_at;
 	GLuint skip_programs[8];
 	int skip_count;
 	unsigned long log_frame_number;
 } debug;
+
+/* frames whose every step the GPU is waited for (gpu_check) */
+#define GPU_CHECK_FRAMES 2
+
+/* what Cemu needed (STATUS.md, milestone 3), each on unless its switch is
+in gl.txt, in the log once, so that a hardware run says which it ran with */
+static void debug_describe(void)
+{
+	wiiu_log("gl: Cemu's workarounds: strips drawn as lists %s (native_strips), one short fetched as two %s "
+		"(native_shorts), packed normals unpacked unsigned %s (packed_unsigned), cube maps read as arrays of faces %s "
+		"(native_cubes)", debug.native_strips ? "off" : "on", debug.native_shorts ? "off" : "on",
+		debug.packed_unsigned ? "off" : "on", debug.native_cubes ? "off" : "on");
+	wiiu_log("gl: the GPU waited for after each step of the first %d frames that draw: %s (no_gpu_check)",
+		GPU_CHECK_FRAMES, debug.no_gpu_check ? "off" : "on");
+}
 
 static void debug_load(void)
 {
@@ -151,7 +171,11 @@ static void debug_load(void)
 	debug.loaded = 1;
 	file = fopen(WIIU_APP_FOLDER "/gl.txt", "rb");
 	if (!file)
+	{
+		wiiu_log("gl: no gl.txt: every bring-up switch off");
+		debug_describe();
 		return;
+	}
 	while (fscanf(file, "%63s", word) == 1)
 	{
 		if (!strcmp(word, "log_draws")) debug.log_draws = 1;
@@ -174,6 +198,8 @@ static void debug_load(void)
 		if (!strcmp(word, "math_cubes")) debug.math_cubes = 1;
 		if (!strcmp(word, "cube_probe")) debug.cube_probe = 1;
 		if (!strcmp(word, "native_cubes")) debug.native_cubes = 1;
+		if (!strcmp(word, "native_shorts")) debug.native_shorts = 1;
+		if (!strcmp(word, "no_gpu_check")) debug.no_gpu_check = 1;
 		sscanf(word, "log_at=%lu", &debug.log_at);
 		if (debug.skip_count < 8 && sscanf(word, "skip_program=%u", &debug.skip_programs[debug.skip_count]) == 1)
 			debug.skip_count++;
@@ -188,6 +214,7 @@ static void debug_load(void)
 #else
 	debug.loaded = 1;
 #endif
+	debug_describe();
 }
 
 /* ---------- limits */
@@ -329,6 +356,7 @@ struct program
 	uint32_t pixel_values[UNIFORM_COMPONENTS];
 	int vertex_dirty_low, vertex_dirty_high, pixel_dirty_low, pixel_dirty_high;
 	int deleted;
+	int gpu_checked;         /* its first draw waited for (gpu_check_step) */
 };
 
 struct query
@@ -514,6 +542,253 @@ static void gpu_written(const void *data, unsigned long size, GX2InvalidateMode 
 		GX2Invalidate(mode, (void *)data, size);
 }
 
+/* ---------- the waits, timed, and the game's thread watched
+
+Evidence for hardware runs, where nothing else shows what a frame spends its
+time on. GX2's waits for the GPU (GX2DrawDone, GX2WaitTimeStamp) give up
+after GX2's GPU timeout, 10 s from GX2Init, and return FALSE (decaf-emu's
+gx2_state.cpp and gx2_cbpool.cpp): a GPU that has stopped makes each frame
+take that long while the game runs on, its input read and its sound starved.
+So every wait is timed and a wait that gave up is logged; the first frames
+that draw, and each program's first draw, wait for the GPU after each step
+(gpu_check), to name the first step it does not finish; the frames' times go to the log every 2 s for the
+first 2 minutes; and a thread of its own logs where the game's thread is when
+it stays in one place for more than 3 s. */
+
+static struct
+{
+	/* since the last line in the log */
+	unsigned long frames, gpu_waits, gpu_timeouts, queries, query_timeouts, compiles, cache_reads, cache_writes;
+	OSTime period_start, frame_start, longest_frame, gpu_wait, query_wait, compile, cache_read, cache_write;
+	/* gpu_check's */
+	int checking, checked_frames, check_failed;
+	unsigned long checks;
+	uint32_t timeout_saved;
+	OSTime longest_check;
+	char last_finished[96];
+	/* the watch thread's */
+	const char *volatile step;
+	volatile OSTime step_time;
+	volatile int stop;
+	OSThread *thread;
+	void *stack;
+} watch;
+
+static void watch_step(const char *step)
+{
+	watch.step = step;
+	watch.step_time = OSGetSystemTime();
+}
+
+void wiiu_gl_step(const char *step)
+{
+	watch_step(step);
+}
+
+/* the GPU waited for, up to stamp; 0 if GX2 gave up */
+static int gpu_wait(OSTime stamp, const char *what)
+{
+	OSTime start = OSGetSystemTime(), took;
+	const char *was = watch.step;
+	BOOL done;
+
+	watch_step(what);
+	done = GX2WaitTimeStamp(stamp);
+	took = OSGetSystemTime() - start;
+	watch.gpu_wait += took;
+	watch.gpu_waits++;
+	if (!done)
+	{
+		static unsigned long timeouts;
+
+		watch.gpu_timeouts++;
+		if (timeouts++ < 8)
+			wiiu_log("gl: the GPU did not finish (%s): GX2 gave up after %lu ms; frame %lu, draw %lu of the frame, "
+				"retired %llu of %llu submitted", what, (unsigned long)OSTicksToMilliseconds(took), gl.frame,
+				gl.frame_draws, (unsigned long long)GX2GetRetiredTimeStamp(),
+				(unsigned long long)GX2GetLastSubmittedTimeStamp());
+	}
+	watch.step = was ? was : "the renderer";
+	return done;
+}
+
+/* (GX2DrawDone's own: decaf's gx2_event.cpp) */
+static int gpu_done(const char *what)
+{
+	GX2Flush();
+	return gpu_wait(GX2GetLastSubmittedTimeStamp(), what);
+}
+
+/* the frames gpu_check covers begin at their first draw (and a program's
+first draw is checked in any frame: gpu_check_step) */
+static void gpu_check_arm(void)
+{
+	if (watch.checking || watch.checked_frames >= GPU_CHECK_FRAMES || debug.no_gpu_check || !gl.ready)
+		return;
+	watch.checking = 1;
+	watch.checks = 0;
+	watch.longest_check = 0;
+	strcpy(watch.last_finished, "the frame's start");
+	/* (a stopped GPU found in a second, not ten) */
+	watch.timeout_saved = GX2GetGPUTimeout();
+	GX2SetGPUTimeout(1000);
+	wiiu_log("gl: frame %lu: the GPU waited for after each step", gl.frame);
+}
+
+/* after a step of a checked frame, or a program's first draw (always): the
+GPU let finish it; the first it does not finish is logged, and the next
+frame's draws with it (log_frame) */
+static void gpu_check_step(const char *step, int always)
+{
+	OSTime start;
+	uint32_t timeout = 0;
+	int done;
+
+	if (watch.check_failed || debug.no_gpu_check || (!watch.checking && !always) || !gl.ready)
+		return;
+	if (!watch.checking)
+	{
+		timeout = GX2GetGPUTimeout();
+		GX2SetGPUTimeout(1000);
+	}
+	start = OSGetSystemTime();
+	watch.checks++;
+	done = gpu_done(step);
+	if (timeout)
+		GX2SetGPUTimeout(timeout);
+	if (!done)
+	{
+		watch.check_failed = 1;
+		wiiu_log("gl: the GPU stopped at frame %lu's %s (draw %lu of the frame, program %u, framebuffer %u %lux%lu, "
+			"depth test %d, blend %d); the last step it finished: %s", gl.frame, step, gl.frame_draws, gl.program,
+			gl.draw_framebuffer, gl.target_width, gl.target_height, gl.depth_test, gl.blend,
+			watch.last_finished[0] ? watch.last_finished : "none checked yet");
+		debug.log_frame = 1;
+		debug.log_frame_number = gl.frame + 1;
+		return;
+	}
+	if (OSGetSystemTime() - start > watch.longest_check)
+		watch.longest_check = OSGetSystemTime() - start;
+	snprintf(watch.last_finished, sizeof(watch.last_finished), "%s (frame %lu, draw %lu of the frame, program %u)", step,
+		gl.frame, gl.frame_draws, gl.program);
+}
+
+static void gpu_check(const char *step)
+{
+	gpu_check_step(step, 0);
+}
+
+static void gpu_check_frame_end(void)
+{
+	if (!watch.checking)
+		return;
+	watch.checking = 0;
+	watch.checked_frames++;
+	GX2SetGPUTimeout(watch.timeout_saved);
+	if (!watch.check_failed)
+		wiiu_log("gl: frame %lu: the GPU finished each of its %lu steps (%lu draws), the longest in %lu us", gl.frame,
+			watch.checks, gl.frame_draws, (unsigned long)OSTicksToMicroseconds(watch.longest_check));
+}
+
+/* (every frame's end: a line every 2 s for the first 2 minutes, every
+300 frames after) */
+static void watch_frame_end(void)
+{
+	OSTime now = OSGetSystemTime();
+	OSTime vsync_wait = 0;
+	unsigned long vsync_timeouts = 0, elapsed;
+
+	if (watch.frame_start && now - watch.frame_start > watch.longest_frame)
+		watch.longest_frame = now - watch.frame_start;
+	watch.frame_start = now;
+	watch.frames++;
+	if (!watch.period_start)
+		watch.period_start = now;
+	elapsed = (unsigned long)OSTicksToMilliseconds(now - watch.period_start);
+	if (OSTicksToMilliseconds(now - gl.start) < 120000 ? elapsed < 2000 : watch.frames < 300)
+		return;
+	wiiu_video_take_waits(&vsync_wait, &vsync_timeouts);
+	wiiu_log("gl: frame %lu: %lu frames in %lu ms (the longest %lu ms), %lu draws in the last; waited: GPU %lu ms "
+		"(%lu waits, %lu gave up), flips %lu ms (%lu gave up), queries %lu ms (%lu, %lu gave up); shaders: %lu "
+		"compiled in %lu ms, %lu read in %lu ms, %lu written in %lu ms", gl.frame, watch.frames, elapsed,
+		(unsigned long)OSTicksToMilliseconds(watch.longest_frame), gl.frame_draws,
+		(unsigned long)OSTicksToMilliseconds(watch.gpu_wait), watch.gpu_waits, watch.gpu_timeouts,
+		(unsigned long)OSTicksToMilliseconds(vsync_wait), vsync_timeouts,
+		(unsigned long)OSTicksToMilliseconds(watch.query_wait), watch.queries, watch.query_timeouts, watch.compiles,
+		(unsigned long)OSTicksToMilliseconds(watch.compile), watch.cache_reads,
+		(unsigned long)OSTicksToMilliseconds(watch.cache_read), watch.cache_writes,
+		(unsigned long)OSTicksToMilliseconds(watch.cache_write));
+	watch.frames = watch.gpu_waits = watch.gpu_timeouts = watch.queries = watch.query_timeouts = 0;
+	watch.compiles = watch.cache_reads = watch.cache_writes = 0;
+	watch.gpu_wait = watch.query_wait = watch.compile = watch.cache_read = watch.cache_write = 0;
+	watch.longest_frame = 0;
+	watch.period_start = now;
+}
+
+/* the watch thread: where the game's thread has stayed for more than 3 s,
+while the game has the foreground (the HOME button menu's wait is not
+logged), once, then every 10 s */
+static int watch_main(int argc, const char **argv)
+{
+	const char *logged = NULL;
+	OSTime logged_at = 0;
+
+	(void)argc;
+	(void)argv;
+	while (!watch.stop)
+	{
+		const char *step;
+		OSTime since, now;
+
+		OSSleepTicks(OSMillisecondsToTicks(500));
+		step = watch.step;
+		since = watch.step_time;
+		now = OSGetSystemTime();
+		if (!step || !wiiu_video_drawing() || now - since < OSSecondsToTicks(3))
+			continue;
+		if (step == logged && now - logged_at < OSSecondsToTicks(10))
+			continue;
+		wiiu_log("gl: watch: the game's thread in %s for %lu s (frame %lu, draw %lu of the frame)", step,
+			(unsigned long)(OSTicksToMilliseconds(now - since) / 1000), gl.frame, gl.frame_draws);
+		logged = step;
+		logged_at = now;
+	}
+	return 0;
+}
+
+static void watch_stop(void)
+{
+	if (!watch.thread)
+		return;
+	watch.stop = 1;
+	OSJoinThread(watch.thread, NULL);
+	watch.thread = NULL;
+}
+
+static void watch_start(void)
+{
+	const uint32_t stack_size = 0x4000;
+
+	if (watch.thread)
+		return;
+	watch.thread = memalign(16, sizeof(OSThread));
+	watch.stack = memalign(16, stack_size);
+	if (!watch.thread || !watch.stack ||
+		!OSCreateThread(watch.thread, watch_main, 0, NULL, (unsigned char *)watch.stack + stack_size, stack_size, 17,
+		OS_THREAD_ATTRIB_AFFINITY_ANY))
+	{
+		free(watch.thread);
+		free(watch.stack);
+		watch.thread = NULL;
+		wiiu_log("gl: the watch thread not started");
+		return;
+	}
+	OSSetThreadName(watch.thread, "gl watch");
+	OSResumeThread(watch.thread);
+	/* (ended before proc_end, which atexit took first) */
+	atexit(watch_stop);
+}
+
 /* memory the GPU may still read, let go once the frame that last used it
 is done (wiiu_gl_frame_end): two lists, this frame's and the last */
 #define RETIRED_MAXIMUM 512
@@ -574,7 +849,7 @@ static void retire(void *item, int kind)
 	{
 		/* (more than a frame holds: the GPU let finish, then all of them
 		let go) */
-		GX2DrawDone();
+		gpu_done("the GPU let finish to free memory");
 		retired_free(half);
 		retired_free(half ^ 1);
 	}
@@ -601,7 +876,7 @@ static void *ring_reserve(unsigned long size)
 			warned = 1;
 			wiiu_log("gl: a frame's draw data passed %lu MB; the GPU is waited for", half >> 20);
 		}
-		GX2DrawDone();
+		gpu_done("the GPU let finish for the draw data ring");
 		aligned = start;
 		if (size > half)
 			return NULL;
@@ -959,6 +1234,7 @@ static void texture_upload_tiled(struct texture *texture, int level, unsigned lo
 		texture_rows(memory, staging.pitch * element_bytes, source, rows, row_bytes, width, bgra);
 		gpu_written(memory, staging.imageSize, GX2_INVALIDATE_MODE_CPU_TEXTURE);
 		GX2CopySurface(&staging, 0, 0, &texture->gx2.surface, (uint32_t)level, (uint32_t)(z + slice));
+		gpu_check("a texture's copy into GX2's tiling");
 		retire(memory, _retired_memory);
 		source += rows * row_bytes;
 	}
@@ -1104,7 +1380,7 @@ static void generate_mipmaps(struct texture *texture)
 	if (texture->written)
 	{
 		/* (what the GPU drew is in memory first) */
-		GX2DrawDone();
+		gpu_done("the GPU let finish to read a texture drawn");
 		DCInvalidateRange(texture->memory, texture->bytes);
 	}
 	for (level = 1; level < texture->levels; level++)
@@ -1592,32 +1868,62 @@ static int shader_compile(struct shader *shader)
 			key = (key ^ (unsigned char)*byte) * 1099511628211ULL;
 		shader->key = key;
 	}
-	if (vertex)
-		shader->vertex = wiiu_shader_cache_load(shader->key, 1);
-	else
-		shader->pixel = wiiu_shader_cache_load(shader->key, 0);
-	if (shader->vertex || shader->pixel)
+	/* (each step timed: the first 64 shaders' in the log, all of them in
+	the frames' lines, watch_frame_end) */
 	{
-		shader->cached = 1;
-		compile_stats.cached++;
-		mode = GX2_SHADER_MODE_UNIFORM_REGISTER;
-	}
-	else
-	{
-	compiler_start();
-	if (vertex)
-		mode = CompileVertexShader(text, GLSL_COMPILE_REGISTER, &shader->vertex, shader->log, sizeof(shader->log),
-			GLSL_COMPILER_FLAG_NONE);
-	else
-		mode = CompilePixelShader(text, GLSL_COMPILE_REGISTER, &shader->pixel, shader->log, sizeof(shader->log),
-			GLSL_COMPILER_FLAG_NONE);
-	if (mode != GLSL_SHADER_MODE_ERROR)
-	{
+		OSTime read_start = OSGetSystemTime(), read_time, compile_time = 0, write_time = 0;
+		int written = -1;
+
+		watch_step("a shader read from the SD card");
 		if (vertex)
-			wiiu_shader_cache_store(shader->key, 1, shader->vertex);
+			shader->vertex = wiiu_shader_cache_load(shader->key, 1);
 		else
-			wiiu_shader_cache_store(shader->key, 0, shader->pixel);
-	}
+			shader->pixel = wiiu_shader_cache_load(shader->key, 0);
+		read_time = OSGetSystemTime() - read_start;
+		watch.cache_read += read_time;
+		watch.cache_reads++;
+		if (shader->vertex || shader->pixel)
+		{
+			shader->cached = 1;
+			compile_stats.cached++;
+			mode = GX2_SHADER_MODE_UNIFORM_REGISTER;
+		}
+		else
+		{
+			OSTime compile_start;
+
+			compiler_start();
+			watch_step(vertex ? "CafeGLSL compiling a vertex shader" : "CafeGLSL compiling a pixel shader");
+			compile_start = OSGetSystemTime();
+			if (vertex)
+				mode = CompileVertexShader(text, GLSL_COMPILE_REGISTER, &shader->vertex, shader->log,
+					sizeof(shader->log), GLSL_COMPILER_FLAG_NONE);
+			else
+				mode = CompilePixelShader(text, GLSL_COMPILE_REGISTER, &shader->pixel, shader->log,
+					sizeof(shader->log), GLSL_COMPILER_FLAG_NONE);
+			compile_time = OSGetSystemTime() - compile_start;
+			watch.compile += compile_time;
+			watch.compiles++;
+			if (mode != GLSL_SHADER_MODE_ERROR)
+			{
+				OSTime write_start = OSGetSystemTime();
+
+				watch_step("a shader written to the SD card");
+				written = wiiu_shader_cache_store(shader->key, vertex, vertex ? (const void *)shader->vertex :
+					(const void *)shader->pixel);
+				write_time = OSGetSystemTime() - write_start;
+				watch.cache_write += write_time;
+				watch.cache_writes++;
+			}
+		}
+		if (compile_stats.compiled + compile_stats.failed < 64)
+			wiiu_log("gl: shader %lu, %s, %lu bytes of GLSL: %s in %lu ms, compiled in %lu ms, written to the SD card %s "
+				"in %lu ms", compile_stats.compiled + compile_stats.failed + 1, vertex ? "vertex" : "pixel",
+				(unsigned long)strlen(text), shader->cached ? "read from the SD card" : "not on the SD card",
+				(unsigned long)OSTicksToMilliseconds(read_time), (unsigned long)OSTicksToMilliseconds(compile_time),
+				written < 0 ? "(not written)" : written ? "whole" : "FAILED",
+				(unsigned long)OSTicksToMilliseconds(write_time));
+		watch_step("the game's own work");
 	}
 	compile_stats.time += OSGetSystemTime() - start;
 	if (mode == GLSL_SHADER_MODE_ERROR)
@@ -1672,7 +1978,8 @@ static int shader_compile(struct shader *shader)
 #endif
 }
 
-/* a compiled shader's variables, in the log */
+/* a compiled shader's variables, in the log (its uniforms counted: CafeGLSL
+lists each element of an array on its own) */
 static void shader_describe(const struct shader *shader)
 {
 	uint32_t index;
@@ -1684,10 +1991,6 @@ static void shader_describe(const struct shader *shader)
 		wiiu_log("gl: vertex shader: %u bytes, mode %d, %u uniforms, %u attributes, %u samplers", (unsigned int)vertex->size,
 			(int)vertex->mode, (unsigned int)vertex->uniformVarCount, (unsigned int)vertex->attribVarCount,
 			(unsigned int)vertex->samplerVarCount);
-		for (index = 0; index < vertex->uniformVarCount; index++)
-			wiiu_log("gl:   uniform %s: type %d, count %u, offset %u, block %d", vertex->uniformVars[index].name,
-				(int)vertex->uniformVars[index].type, (unsigned int)vertex->uniformVars[index].count,
-				(unsigned int)vertex->uniformVars[index].offset, (int)vertex->uniformVars[index].block);
 		for (index = 0; index < vertex->attribVarCount; index++)
 			wiiu_log("gl:   attribute %s: type %d, location %u", vertex->attribVars[index].name,
 				(int)vertex->attribVars[index].type, (unsigned int)vertex->attribVars[index].location);
@@ -1698,10 +2001,6 @@ static void shader_describe(const struct shader *shader)
 
 		wiiu_log("gl: pixel shader: %u bytes, mode %d, %u uniforms, %u samplers", (unsigned int)pixel->size,
 			(int)pixel->mode, (unsigned int)pixel->uniformVarCount, (unsigned int)pixel->samplerVarCount);
-		for (index = 0; index < pixel->uniformVarCount; index++)
-			wiiu_log("gl:   uniform %s: type %d, count %u, offset %u, block %d", pixel->uniformVars[index].name,
-				(int)pixel->uniformVars[index].type, (unsigned int)pixel->uniformVars[index].count,
-				(unsigned int)pixel->uniformVars[index].offset, (int)pixel->uniformVars[index].block);
 		for (index = 0; index < pixel->samplerVarCount; index++)
 			wiiu_log("gl:   sampler %s: type %d, location %u", pixel->samplerVars[index].name,
 				(int)pixel->samplerVars[index].type, (unsigned int)pixel->samplerVars[index].location);
@@ -2474,7 +2773,8 @@ static int attribute_format(const struct attribute *attribute, GX2AttribFormat *
 		/* (one short is fetched as two, the second masked off: Cemu decodes
 		no single 16-bit attribute, _emitAttributeDecodeGLSL's "unsupported
 		fmt 05"; the word is the vertex's or a copy's, padded) */
-		*format = (GX2AttribFormat)((size <= 2 ? GX2_ATTRIB_TYPE_16_16 : GX2_ATTRIB_TYPE_16_16_16_16) | flags |
+		*format = (GX2AttribFormat)((size == 1 && debug.native_shorts ? GX2_ATTRIB_TYPE_16 :
+			size <= 2 ? GX2_ATTRIB_TYPE_16_16 : GX2_ATTRIB_TYPE_16_16_16_16) | flags |
 			(attribute->type == GL_SHORT ? GX2_ATTRIB_FLAG_SIGNED : 0));
 		*bytes = 2 * (unsigned long)size;
 		return 1;
@@ -2744,7 +3044,7 @@ static const void *fan_as_list(unsigned long first, unsigned long count, const u
 	return list;
 }
 
-static void draw(GLenum mode, unsigned long first, unsigned long count, GLenum index_type, const void *indices,
+static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GLenum index_type, const void *indices,
 	long base_vertex)
 {
 	GX2PrimitiveMode primitive;
@@ -2818,6 +3118,7 @@ static void draw(GLenum mode, unsigned long first, unsigned long count, GLenum i
 				((const uint16_t *)source)[6], ((const uint16_t *)source)[7]);
 		}
 	}
+	gpu_check_arm();
 	if (source)
 	{
 		/* (the indices are the CPU's words, where they are) */
@@ -2829,6 +3130,23 @@ static void draw(GLenum mode, unsigned long first, unsigned long count, GLenum i
 	gl.draws++;
 	gl.frame_draws++;
 	targets_written();
+	{
+		struct program *program = object_get(gl.program, _object_program);
+		int first = program && !program->gpu_checked;
+
+		if (program)
+			program->gpu_checked = 1;
+		gpu_check_step(first ? (source ? "first indexed draw of a program" : "first draw of a program") :
+			(source ? "indexed draw" : "draw"), first);
+	}
+}
+
+static void draw(GLenum mode, unsigned long first, unsigned long count, GLenum index_type, const void *indices,
+	long base_vertex)
+{
+	watch_step("a draw");
+	draw_steps(mode, first, count, index_type, indices, base_vertex);
+	watch_step("the game's own work");
 }
 
 /* ---------- quads of this layer's own: blits and clears */
@@ -2959,7 +3277,11 @@ static int gl_ready(void)
 	/* (OpenGL's clipping: depth -1 to 1, which the vertex shaders' end
 	makes it) */
 	GX2SetRasterizerClipControl(TRUE, TRUE);
-	wiiu_log("gl: ready on GX2 (ring %u MB)", RING_SIZE >> 20);
+	wiiu_log("gl: ready on GX2 (ring %u MB, GX2's GPU timeout %u ms)", RING_SIZE >> 20, (unsigned int)GX2GetGPUTimeout());
+	/* (the switches in the log from the start) */
+	debug_load();
+	watch_step("the game's own work");
+	watch_start();
 	return 1;
 }
 
@@ -3074,7 +3396,7 @@ static void APIENTRY wiiu_glViewport(GLint x, GLint y, GLsizei width, GLsizei he
 	gl.viewport[0] = x; gl.viewport[1] = y; gl.viewport[2] = width; gl.viewport[3] = height;
 }
 static void APIENTRY wiiu_glPixelStorei(GLenum name, GLint value) { (void)name; (void)value; }
-static void APIENTRY wiiu_glFinish(void) { if (gl.ready) GX2DrawDone(); }
+static void APIENTRY wiiu_glFinish(void) { if (gl.ready) gpu_done("glFinish"); }
 static void APIENTRY wiiu_glFlush(void) { if (gl.ready) GX2Flush(); }
 static void APIENTRY wiiu_glMemoryBarrier(GLbitfield barriers) { (void)barriers; }
 static GLenum APIENTRY wiiu_glGetError(void) { return GL_NO_ERROR; }
@@ -3484,6 +3806,10 @@ static void APIENTRY wiiu_glClear(GLbitfield mask)
 	}
 	if (color)
 		targets_written();
+	/* (in the frames gpu_check covers, from the second frame that draws on) */
+	if (gl.draws)
+		gpu_check_arm();
+	gpu_check(color && depth ? "clear of color and depth" : color ? "clear of color" : "clear of depth");
 }
 
 
@@ -3679,6 +4005,7 @@ static void APIENTRY wiiu_glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLi
 	quad_draw(gl.blit_pixel, x0, y0, x1, y1, (float)sx0 / (float)source_width, (float)sy0 / (float)source_height,
 		(float)sx1 / (float)source_width, (float)sy1 / (float)source_height);
 	targets_written();
+	gpu_check(gl.draw_framebuffer ? "blit" : "blit to the screen");
 }
 
 static void APIENTRY wiiu_glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type,
@@ -4333,6 +4660,7 @@ static void APIENTRY wiiu_glBeginQuery(GLenum target, GLuint name)
 	if (!query->data)
 		return;
 	GX2QueryBegin(WIIU_QUERY_OCCLUSION, query->data);
+	gpu_check("visibility query's begin");
 	query->issued = 1;
 	query->available = 0;
 	active_query = name;
@@ -4344,7 +4672,10 @@ static void APIENTRY wiiu_glEndQuery(GLenum target)
 
 	(void)target;
 	if (query && query->data && query->issued)
+	{
 		GX2QueryEnd(WIIU_QUERY_OCCLUSION, query->data);
+		gpu_check("visibility query's end");
+	}
 	active_query = 0;
 }
 
@@ -4370,10 +4701,37 @@ static void APIENTRY wiiu_glGetQueryObjectuiv(GLuint name, GLenum parameter, GLu
 		}
 		else if (parameter == GL_QUERY_RESULT)
 		{
-			/* (the GPU given what is queued, then waited for) */
+			/* (the GPU given what is queued, then waited for, 100 ms at
+			most: the result is the GPU's write to memory, read past the
+			CPU's cache after the first look; one that never comes counts
+			no samples) */
+			OSTime start = OSGetSystemTime(), waited;
+			int done;
+
+			watch_step("waiting for a visibility query");
 			GX2Flush();
-			while (!GX2QueryGetOcclusionResult(query->data, &result))
-				;
+			for (;;)
+			{
+				done = GX2QueryGetOcclusionResult(query->data, &result);
+				waited = OSGetSystemTime() - start;
+				if (done || waited > OSMillisecondsToTicks(100))
+					break;
+				OSSleepTicks(OSMicrosecondsToTicks(50));
+				DCInvalidateRange(query->data, sizeof(wiiu_query_data));
+			}
+			watch.query_wait += waited;
+			watch.queries++;
+			if (!done)
+			{
+				static unsigned long timeouts;
+
+				watch.query_timeouts++;
+				result = 0;
+				if (timeouts++ < 8)
+					wiiu_log("gl: a visibility query's result did not come in 100 ms (frame %lu); taken as 0",
+						gl.frame);
+			}
+			watch_step("the game's own work");
 			query->available = 1;
 			query->result = (GLuint)result;
 		}
@@ -4400,11 +4758,14 @@ void wiiu_gl_frame_end(void)
 		return;
 	if (debug.trace && gl.frame < 12)
 		wiiu_log("gl: frame %lu ends: %lu draws", gl.frame, gl.frame_draws);
+	gpu_check("copy to the screens and swap");
+	gpu_check_frame_end();
+	watch_step("the frame's end");
 	GX2Flush();
 	gl.frame_stamps[gl.frame_half] = GX2GetLastSubmittedTimeStamp();
 	gl.frame_half ^= 1;
 	if (gl.frame_stamps[gl.frame_half])
-		GX2WaitTimeStamp(gl.frame_stamps[gl.frame_half]);
+		gpu_wait(gl.frame_stamps[gl.frame_half], "the GPU let finish the frame before last");
 	retired_free(gl.frame_half);
 	gl.ring_offset = (unsigned long)gl.frame_half * (RING_SIZE / 2);
 	/* (the next frame binds its own) */
@@ -4427,20 +4788,8 @@ void wiiu_gl_frame_end(void)
 		debug.log_frame = 1;
 		debug.log_frame_number = gl.frame;
 	}
-#ifdef HALO_WIIU_GL_SWITCHES
-	if (gl.frame == 1 || gl.frame % 300 == 0)
-	{
-		static OSTime last;
-		static unsigned long last_frame;
-		OSTime now = OSGetSystemTime();
-
-		wiiu_log("gl: frame %lu, %lu draws in the last; %lu ms a frame since frame %lu", gl.frame, gl.frame_draws,
-			last && gl.frame > last_frame ? (unsigned long)(OSTicksToMilliseconds(now - last) / (gl.frame - last_frame)) : 0UL,
-			last_frame);
-		last = now;
-		last_frame = gl.frame;
-	}
-#endif
+	watch_frame_end();
+	watch_step("the game's own work");
 	gl.frame_draws = 0;
 }
 

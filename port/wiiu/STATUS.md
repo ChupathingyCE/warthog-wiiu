@@ -194,3 +194,45 @@ is the measure (not chased).
 **Next.** On the console: the switches above, one at a time, to learn
 which of Cemu's needs hardware shares; the frame time; the GamePad and Pro
 Controller; the sound.
+
+## First hardware run of the renderer (2026-10-22)
+
+**Seen on the console.** GX2 and CafeGLSL start; the start-up shaders and
+the main menu's first 11 shaders compile and are written to the SD card
+(their files' times: 4 s for all 11, so compiling is not the stall). Then
+the screen stays black and the music is choppy, while the game's thread
+still runs: it reads the controllers every frame (`platform_pump_events`),
+which is where HOME and Close ended it. No frame line came (one every 300
+frames), so frames took seconds each.
+
+What fits all of it: a GPU that stopped. GX2's waits for the GPU give up
+after GX2's GPU timeout, 10 s from GX2Init, and return FALSE (decaf-emu's
+gx2_state.cpp and gx2_cbpool.cpp); the frame's end waits for the frame
+before last, so each frame takes that long and no flip comes. Not certain
+yet, so the next run logs it:
+
+- every GPU wait timed, and any that gives up logged with the timestamps
+  retired and submitted; the flip wait's 10-vsync give-ups logged;
+- the first two frames that draw, and each program's first draw in any
+  frame, wait for the GPU after each step (draws, clears, blits, texture
+  copies, visibility queries, the swap) with a 1 s timeout: "the GPU
+  stopped at" names the first step it did not finish, and the next frame's
+  draws are logged in full (`no_gpu_check` turns it off);
+- a line every 2 s for the first 2 minutes: frames, the longest frame,
+  time in GPU waits, flip waits, visibility queries, shader compiles and
+  the SD card's reads and writes;
+- a thread ("gl watch") logs where the game's thread is when it stays in
+  one place for more than 3 s;
+- each of the first 64 shaders: read or compiled, with its times and
+  whether its file was written whole (uniforms now a count, not a line
+  each);
+- Cemu's four workarounds and their switches in the log at the start
+  (`native_shorts` is new: one 16-bit attribute fetched as one).
+
+The visibility queries' wait (the game reads each result) was a loop with
+no end; it now gives up after 100 ms, counting no samples.
+
+**The music.** AX is fed on time: 1407 buffers of 1024 samples in 10000 AX
+frames (30 s) is real time. The mixer's streams are refilled by the game's
+thread (`DirectSoundDoWork`, every frame: dsound_sdl.c), so a frame of
+seconds starves them. It should follow the frame rate.

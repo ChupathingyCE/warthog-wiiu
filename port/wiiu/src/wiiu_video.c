@@ -397,21 +397,47 @@ void wiiu_video_shutdown(void)
 
 /* ---------- the frame */
 
+/* the frame waits, timed (wiiu_video_take_waits) */
+static OSTime frame_wait_time;
+static unsigned long frame_wait_timeouts;
+
 /* (libwhb's WHBGfxBeginRender: the previous swap shown first, at most ten
-vsyncs' wait) */
+vsyncs' wait; a wait that gives up is logged, as libwhb's is: a flip that
+does not come is a GPU that does not get to the swap) */
 static void video_frame_wait(void)
 {
 	uint32_t swap_count, flip_count;
-	OSTime last_flip, last_vsync;
+	OSTime last_flip, last_vsync, start = OSGetSystemTime();
 	int waits;
 
-	for (waits = 0; waits < 10; waits++)
+	wiiu_gl_step("waiting for the last frame's flip");
+	for (waits = 0;; waits++)
 	{
 		GX2GetSwapStatus(&swap_count, &flip_count, &last_flip, &last_vsync);
 		if (flip_count >= swap_count)
-			return;
+			break;
+		if (waits == 10)
+		{
+			static unsigned long logged;
+
+			frame_wait_timeouts++;
+			if (logged++ < 8)
+				wiiu_log("video: the last frame's flip did not come in 10 vsyncs (%lu swaps, %lu flips)",
+					(unsigned long)swap_count, (unsigned long)flip_count);
+			break;
+		}
 		GX2WaitForVsync();
 	}
+	frame_wait_time += OSGetSystemTime() - start;
+	wiiu_gl_step("the copy to the screens");
+}
+
+void wiiu_video_take_waits(OSTime *time, unsigned long *timeouts)
+{
+	*time = frame_wait_time;
+	*timeouts = frame_wait_timeouts;
+	frame_wait_time = 0;
+	frame_wait_timeouts = 0;
 }
 
 /* the frame's color buffer on both screens (SDL's WIIU_SDL_RenderPresent) */

@@ -12,7 +12,7 @@ The renderer's compiled shaders kept on the SD card (wiiu_shader_cache.c).
 /* a GX2VertexShader (vertex nonzero) or GX2PixelShader kept under key, or
 NULL; one loaded is let go with wiiu_shader_cache_free */
 void *wiiu_shader_cache_load(uint64_t key, int vertex);
-void wiiu_shader_cache_store(uint64_t key, int vertex, const void *shader);
+int wiiu_shader_cache_store(uint64_t key, int vertex, const void *shader);
 void wiiu_shader_cache_free(int vertex, void *shader);
 
 #endif

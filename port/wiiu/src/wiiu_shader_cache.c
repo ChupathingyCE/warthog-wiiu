@@ -90,7 +90,8 @@ static int write_name(FILE *file, const char *name)
 	return fwrite(&length, sizeof(length), 1, file) == 1 && (!length || fwrite(name, length, 1, file) == 1);
 }
 
-void wiiu_shader_cache_store(uint64_t key, int vertex, const void *shader)
+/* 1 if the file was written whole */
+int wiiu_shader_cache_store(uint64_t key, int vertex, const void *shader)
 {
 	static int folder_made;
 	struct shader_tables tables;
@@ -108,7 +109,7 @@ void wiiu_shader_cache_store(uint64_t key, int vertex, const void *shader)
 	cache_path(path, sizeof(path), key, vertex);
 	file = fopen(path, "wb");
 	if (!file)
-		return;
+		return 0;
 	ok = fwrite(&magic, sizeof(magic), 1, file) == 1 &&
 		fwrite(shader, vertex ? sizeof(GX2VertexShader) : sizeof(GX2PixelShader), 1, file) == 1 &&
 		fwrite(*tables.program, *tables.size, 1, file) == 1;
@@ -132,6 +133,7 @@ void wiiu_shader_cache_store(uint64_t key, int vertex, const void *shader)
 		ok = 0;
 	if (!ok)
 		remove(path);
+	return ok;
 }
 
 /* ---------- reading */
