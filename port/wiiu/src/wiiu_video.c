@@ -19,7 +19,10 @@ GfxProcCallbackReleased);
 frame, then the swap and the flush, the screens enabled after the first
 frame (SDL's WIIU_SDL_RenderPresent);
 - a frame begun only once the previous swap is shown (libwhb's
-WHBGfxBeginRender).
+WHBGfxBeginRender), waited for right after the swap: the game reads its
+input when the present returns, so its next frame starts at the flip with
+nothing queued, and the copy to the scan buffers always finds the one not
+on the screen free.
 
 The game's renderer (port/linux/src/d3d8_gl.c) draws through the OpenGL of
 wiiu_gl.c, into its own targets and then into the color buffer here, which
@@ -397,8 +400,8 @@ void wiiu_video_shutdown(void)
 
 /* ---------- the frame */
 
-/* the frame waits, timed (wiiu_video_take_waits) */
-static OSTime frame_wait_time;
+/* the frame waits, timed (wiiu_video_take_waits, wiiu_video_wait_ticks) */
+static OSTime frame_wait_time, frame_wait_total;
 static unsigned long frame_wait_timeouts;
 
 /* (libwhb's WHBGfxBeginRender: the previous swap shown first, at most ten
@@ -429,7 +432,13 @@ static void video_frame_wait(void)
 		GX2WaitForVsync();
 	}
 	frame_wait_time += OSGetSystemTime() - start;
-	wiiu_gl_step("the copy to the screens");
+	frame_wait_total += OSGetSystemTime() - start;
+	wiiu_gl_step("the game's own work");
+}
+
+OSTime wiiu_video_wait_ticks(void)
+{
+	return frame_wait_total;
 }
 
 void wiiu_video_take_waits(OSTime *time, unsigned long *timeouts)
@@ -440,12 +449,18 @@ void wiiu_video_take_waits(OSTime *time, unsigned long *timeouts)
 	frame_wait_timeouts = 0;
 }
 
-/* the frame's color buffer on both screens (SDL's WIIU_SDL_RenderPresent) */
+/* the frame's color buffer on both screens (SDL's WIIU_SDL_RenderPresent),
+then its flip waited for (libwhb's WHBGfxBeginRender, which waits for the
+last swap before a frame is drawn: here at the end of the frame before,
+since the game's next frame, its input read first, begins when the present
+returns). Before, the wait was for the frame before this one, just before
+this one's copy: a frame drawn from input read one flip earlier, shown a
+flip later, one more frame of delay than libwhb's. */
 void wiiu_video_swap(void)
 {
 	if (video_state != 1 || !video_foreground)
 		return;
-	video_frame_wait();
+	wiiu_gl_step("the copy to the screens");
 	GX2CopyColorBufferToScanBuffer(&color_buffer, GX2_SCAN_TARGET_TV);
 	GX2CopyColorBufferToScanBuffer(&color_buffer, GX2_SCAN_TARGET_DRC);
 	GX2SwapScanBuffers();
@@ -461,6 +476,7 @@ void wiiu_video_swap(void)
 		video_screens_enabled = 1;
 		wiiu_log("video: the first frame shown");
 	}
+	video_frame_wait();
 }
 
 /* (every frame, from the system's events, while the game draws nothing:

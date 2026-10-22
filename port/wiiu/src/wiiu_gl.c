@@ -146,7 +146,7 @@ never reads the file, so every switch stays off. */
 static struct
 {
 	int loaded;
-	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes, native_shorts, no_gpu_check, unaligned_vertices, copy_vertices, linear_textures, no_aniso, only_tex;
+	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes, native_shorts, no_gpu_check, unaligned_vertices, copy_vertices, linear_textures, no_aniso, only_tex, gpu_check, log_shaders;
 	unsigned int only_tex_format;
 	unsigned long log_at;
 	GLuint skip_programs[8];
@@ -165,14 +165,15 @@ static void debug_describe(void)
 		"(native_shorts), packed normals unpacked unsigned %s (packed_unsigned), cube maps read as arrays of faces %s "
 		"(native_cubes)", debug.native_strips ? "off" : "on", debug.native_shorts ? "off" : "on",
 		debug.packed_unsigned ? "off" : "on", debug.native_cubes ? "off" : "on");
-	wiiu_log("gl: the GPU waited for after each step of the first %d frames that draw: %s (no_gpu_check)",
-		GPU_CHECK_FRAMES, debug.no_gpu_check ? "off" : "on");
+	wiiu_log("gl: the GPU waited for after each step of the first %d frames that draw, and of each program's first "
+		"draw: %s (gpu_check)", GPU_CHECK_FRAMES, debug.gpu_check ? "on" : "off");
 	wiiu_log("gl: vertex buffers on GX2_VERTEX_BUFFER_ALIGNMENT %s (unaligned_vertices), every attribute copied to the "
 		"ring %s (copy_vertices)", debug.unaligned_vertices ? "off" : "on", debug.copy_vertices ? "on" : "off");
 	wiiu_log("gl: textures given texels in GX2's tiling, through GX2CopySurface %s (linear_textures)",
 		debug.linear_textures ? "off" : "on");
 	wiiu_log("gl: other switches to narrow a draw down (gl.txt, a word each): no_draws no_depth no_blend no_cull "
-		"white_textures only_tex_format=0xNN no_aniso no_mips skip_program=N log_frame=N log_draws");
+		"white_textures only_tex_format=0xNN no_aniso no_mips skip_program=N; to log more: log_frame=N log_draws "
+		"log_textures log_shaders gpu_check");
 	if (debug.only_tex)
 		wiiu_log("gl: only textures of format 0x%x sampled (only_tex_format), the rest as nothing bound",
 			debug.only_tex_format);
@@ -218,6 +219,8 @@ static void debug_load(void)
 		if (!strcmp(word, "native_cubes")) debug.native_cubes = 1;
 		if (!strcmp(word, "native_shorts")) debug.native_shorts = 1;
 		if (!strcmp(word, "no_gpu_check")) debug.no_gpu_check = 1;
+		if (!strcmp(word, "gpu_check")) debug.gpu_check = 1;
+		if (!strcmp(word, "log_shaders")) debug.log_shaders = 1;
 		if (!strcmp(word, "unaligned_vertices")) debug.unaligned_vertices = 1;
 		if (!strcmp(word, "copy_vertices")) debug.copy_vertices = 1;
 		if (!strcmp(word, "linear_textures")) debug.linear_textures = 1;
@@ -303,6 +306,10 @@ struct texture
 	/* a cube map seen as an array of its six faces (cube_lookup) */
 	GX2Texture array_view;
 	int array_view_made;
+	/* the GPU's time stamp by which its last draw that samples it is done
+	(SDL's WIIU_TextureStartRendering): texels the CPU writes in place
+	wait for it */
+	OSTime used_stamp;
 };
 
 struct buffer
@@ -566,6 +573,26 @@ static void gpu_written(const void *data, unsigned long size, GX2InvalidateMode 
 		GX2Invalidate(mode, (void *)data, size);
 }
 
+/* After GX2's own copies and clears (GX2CopySurface, GX2ClearColor,
+GX2ClearDepthStencilEx): the context state set again and everything this
+layer keeps bound set again at the next draw. On the console these run as
+draws of GX2's own, with its own targets and shaders: libwhb sets the
+context state again after its clears (gfx.c, WHBGfxClearColor), and Cemu's
+GX2CopySurface notes that the real one sets up draw calls where Cemu's is a
+command of its own (GX2_Surface_Copy.cpp), which is why Cemu drew right
+while a copy in the middle of a frame left the console drawing the rest of
+that frame into the texture just copied. */
+static void gx2_own_work_done(void)
+{
+	GX2ContextState *context = wiiu_video_context_state();
+
+	if (context)
+		GX2SetContextState(context);
+	gl.bound_color = NULL;
+	gl.bound_depth = NULL;
+	gl.uploaded_program = 0;
+}
+
 /* ---------- the waits, timed, and the game's thread watched
 
 Evidence for hardware runs, where nothing else shows what a frame spends its
@@ -584,6 +611,15 @@ static struct
 	/* since the last line in the log */
 	unsigned long frames, gpu_waits, gpu_timeouts, queries, query_timeouts, compiles, cache_reads, cache_writes;
 	OSTime period_start, frame_start, longest_frame, gpu_wait, query_wait, compile, cache_read, cache_write;
+	/* the textures given texels (glTexImage, glTexSubImage, glGenerateMipmap)
+	and the time it took, and the in-place writes that waited for the GPU */
+	unsigned long textures, texture_waits;
+	OSTime texture_time;
+	/* where the longest frame's time went: the totals at its start, and
+	the longest's share of each (GPU waits, textures, shaders, the log's
+	SD card writes, the flip) */
+	OSTime base_gpu, base_texture, base_shader, base_log, base_flip;
+	OSTime longest_gpu, longest_texture, longest_shader, longest_log, longest_flip, period_log;
 	/* gpu_check's */
 	int checking, checked_frames, check_failed;
 	unsigned long checks;
@@ -647,7 +683,8 @@ static int gpu_done(const char *what)
 first draw is checked in any frame: gpu_check_step) */
 static void gpu_check_arm(void)
 {
-	if (watch.checking || watch.checked_frames >= GPU_CHECK_FRAMES || debug.no_gpu_check || !gl.ready)
+	if (watch.checking || watch.checked_frames >= GPU_CHECK_FRAMES || !debug.gpu_check || debug.no_gpu_check ||
+		!gl.ready)
 		return;
 	watch.checking = 1;
 	watch.checks = 0;
@@ -668,7 +705,7 @@ static void gpu_check_step(const char *step, int always)
 	uint32_t timeout = 0;
 	int done;
 
-	if (watch.check_failed || debug.no_gpu_check || (!watch.checking && !always) || !gl.ready)
+	if (watch.check_failed || !debug.gpu_check || debug.no_gpu_check || (!watch.checking && !always) || !gl.ready)
 		return;
 	if (!watch.checking)
 	{
@@ -720,16 +757,32 @@ static void watch_frame_end(void)
 {
 	OSTime now = OSGetSystemTime();
 	OSTime vsync_wait = 0;
+	OSTime shader = watch.compile + watch.cache_read + watch.cache_write;
+	OSTime log_time = (OSTime)wiiu_log_write_ticks(), flip = wiiu_video_wait_ticks();
 	unsigned long vsync_timeouts = 0, elapsed;
+	unsigned long period_ms = OSTicksToMilliseconds(now - gl.start) < 120000 ? 2000 : 30000;
 
 	if (watch.frame_start && now - watch.frame_start > watch.longest_frame)
+	{
 		watch.longest_frame = now - watch.frame_start;
+		watch.longest_gpu = watch.gpu_wait - watch.base_gpu;
+		watch.longest_texture = watch.texture_time - watch.base_texture;
+		watch.longest_shader = shader - watch.base_shader;
+		watch.longest_log = log_time - watch.base_log;
+		watch.longest_flip = flip - watch.base_flip;
+	}
 	watch.frame_start = now;
+	watch.base_gpu = watch.gpu_wait;
+	watch.base_texture = watch.texture_time;
+	watch.base_shader = shader;
+	watch.base_log = log_time;
+	watch.base_flip = flip;
 	watch.frames++;
 	if (!watch.period_start)
 		watch.period_start = now;
 	elapsed = (unsigned long)OSTicksToMilliseconds(now - watch.period_start);
-	if (OSTicksToMilliseconds(now - gl.start) < 120000 ? elapsed < 2000 : watch.frames < 300)
+	/* (every 2 s for the first 2 minutes, then every 30 s) */
+	if (elapsed < period_ms)
 		return;
 	wiiu_video_take_waits(&vsync_wait, &vsync_timeouts);
 	wiiu_log("gl: frame %lu: %lu frames in %lu ms (the longest %lu ms), %lu draws in the last; waited: GPU %lu ms "
@@ -742,10 +795,24 @@ static void watch_frame_end(void)
 		(unsigned long)OSTicksToMilliseconds(watch.compile), watch.cache_reads,
 		(unsigned long)OSTicksToMilliseconds(watch.cache_read), watch.cache_writes,
 		(unsigned long)OSTicksToMilliseconds(watch.cache_write));
+	wiiu_log("gl:   the longest frame: GPU waits %lu ms, textures %lu ms, shaders %lu ms, the log %lu ms, the flip %lu "
+		"ms; in all: %lu textures given texels in %lu ms (%lu written in place waited for the GPU), the log's SD card "
+		"writes %lu ms",
+		(unsigned long)OSTicksToMilliseconds(watch.longest_gpu), (unsigned long)OSTicksToMilliseconds(watch.longest_texture),
+		(unsigned long)OSTicksToMilliseconds(watch.longest_shader), (unsigned long)OSTicksToMilliseconds(watch.longest_log),
+		(unsigned long)OSTicksToMilliseconds(watch.longest_flip), watch.textures,
+		(unsigned long)OSTicksToMilliseconds(watch.texture_time), watch.texture_waits,
+		(unsigned long)OSTicksToMilliseconds(log_time - watch.period_log));
+	watch.period_log = log_time;
+	watch.textures = watch.texture_waits = 0;
+	watch.texture_time = 0;
+	watch.base_texture = 0;
 	watch.frames = watch.gpu_waits = watch.gpu_timeouts = watch.queries = watch.query_timeouts = 0;
 	watch.compiles = watch.cache_reads = watch.cache_writes = 0;
 	watch.gpu_wait = watch.query_wait = watch.compile = watch.cache_read = watch.cache_write = 0;
 	watch.longest_frame = 0;
+	watch.base_gpu = 0;
+	watch.base_shader = 0;
 	watch.period_start = now;
 }
 
@@ -1148,7 +1215,7 @@ static int texture_allocate(struct texture *texture, GLenum target, GLenum inter
 		made them, in every run) */
 		static int described;
 
-		if (described++ < 24)
+		if (debug.log_textures && described++ < 24)
 			wiiu_log("gl: texture %lux%lux%lu target 0x%x format 0x%x, tile mode %d (asked %s), use 0x%x, %u levels, "
 				"pitch %u, alignment 0x%x, image %u bytes at %p (0x%x past the alignment), mipmaps %u bytes at %p "
 				"(0x%x past 0x100), swizzle 0x%x, offsets %u %u %u", width, height, depth, target, (unsigned int)format,
@@ -1288,6 +1355,7 @@ static void texture_upload_tiled(struct texture *texture, int level, unsigned lo
 		texture_rows(memory, staging.pitch * element_bytes, source, rows, row_bytes, width, bgra);
 		gpu_written(memory, staging.imageSize, GX2_INVALIDATE_MODE_CPU_TEXTURE);
 		GX2CopySurface(&staging, 0, 0, &texture->gx2.surface, (uint32_t)level, (uint32_t)(z + slice));
+		gx2_own_work_done();
 		gpu_check("a texture's copy into GX2's tiling");
 		retire(memory, _retired_memory);
 		source += rows * row_bytes;
@@ -1298,6 +1366,26 @@ static void texture_upload_tiled(struct texture *texture, int level, unsigned lo
 }
 
 static void texture_flush_drawn(struct texture *texture);
+
+/* (SDL's WIIU_TextureStartRendering: "whichever timestamp will be done
+after" the draw, as the draw's own is not submitted yet) */
+static void texture_used(struct texture *texture)
+{
+	texture->used_stamp = (OSTime)GX2GetLastSubmittedTimeStamp() + 1;
+}
+
+/* before the CPU writes a texture's texels in place: the draws already
+queued that sample it let finish, so that none reads them half written
+(SDL's WIIU_SDL_LockTexture and WIIU_TextureWaitDone: GX2Flush, then
+GX2WaitTimeStamp) */
+static void texture_wait_unused(struct texture *texture)
+{
+	if (!texture->used_stamp || (OSTime)GX2GetRetiredTimeStamp() >= texture->used_stamp)
+		return;
+	watch.texture_waits++;
+	GX2Flush();
+	gpu_wait(texture->used_stamp, "the GPU let finish with a texture written in place");
+}
 
 /* A tiled 2D texture's levels changed by the CPU (a part of a level written,
 glGenerateMipmap): its levels copied into a linear twin, the same size and
@@ -1318,6 +1406,7 @@ static int texture_twin_make(struct texture *texture, struct texture *twin, int 
 	texture_flush_drawn(texture);
 	for (level = first; level <= last && level < texture->levels; level++)
 		GX2CopySurface(&texture->gx2.surface, (uint32_t)level, 0, &twin->gx2.surface, (uint32_t)level, 0);
+	gx2_own_work_done();
 	GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, twin->memory, twin->bytes);
 	gpu_done("the GPU let finish to untile a texture's levels");
 	DCInvalidateRange(twin->memory, twin->bytes);
@@ -1332,6 +1421,7 @@ static void texture_twin_commit(struct texture *texture, struct texture *twin, i
 	gpu_written(twin->memory, twin->bytes, GX2_INVALIDATE_MODE_CPU_TEXTURE);
 	for (level = first; level <= last && level < texture->levels; level++)
 		GX2CopySurface(&twin->gx2.surface, (uint32_t)level, 0, &texture->gx2.surface, (uint32_t)level, 0);
+	gx2_own_work_done();
 	GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, texture->memory, texture->bytes);
 	gpu_check("a texture's levels copied back into GX2's tiling");
 	if (twin->defined_levels > texture->defined_levels)
@@ -1406,6 +1496,7 @@ static void texture_upload(struct texture *texture, GLenum target, int level, un
 		texture_upload_tiled(texture, level, z, width, height, depth, data, format);
 		return;
 	}
+	texture_wait_unused(texture);
 	base = texture_level(texture, level, &pitch, &slice_bytes);
 	for (slice = 0; slice < (depth ? depth : 1); slice++)
 	{
@@ -1448,8 +1539,22 @@ static GLenum texture_target_of(GLenum target)
 	return target;
 }
 
+static void image_given(GLenum target, GLint level, GLint internal, GLsizei width, GLsizei height,
+	GLsizei depth, GLenum format, const void *pixels);
+
+/* (timed, for the frame lines: watch) */
 static void image(GLenum target, GLint level, GLint internal, GLsizei width, GLsizei height, GLsizei depth,
 	GLenum format, const void *pixels)
+{
+	OSTime start = OSGetSystemTime();
+
+	image_given(target, level, internal, width, height, depth, format, pixels);
+	watch.texture_time += OSGetSystemTime() - start;
+	watch.textures++;
+}
+
+static void image_given(GLenum target, GLint level, GLint internal, GLsizei width, GLsizei height,
+	GLsizei depth, GLenum format, const void *pixels)
 {
 	struct texture *texture = bound_texture(target);
 	GLenum whole = texture_target_of(target);
@@ -1507,6 +1612,8 @@ static void generate_mipmaps(struct texture *texture)
 		gpu_done("the GPU let finish to read a texture drawn");
 		DCInvalidateRange(texture->memory, texture->bytes);
 	}
+	else
+		texture_wait_unused(texture);
 	for (level = 1; level < texture->levels; level++)
 	{
 		unsigned long width = level_size(texture->width, level), height = level_size(texture->height, level);
@@ -2040,7 +2147,7 @@ static int shader_compile(struct shader *shader)
 				watch.cache_writes++;
 			}
 		}
-		if (compile_stats.compiled + compile_stats.failed < 64)
+		if (debug.log_shaders && compile_stats.compiled + compile_stats.failed < 64)
 			wiiu_log("gl: shader %lu, %s, %lu bytes of GLSL: %s in %lu ms, compiled in %lu ms, written to the SD card %s "
 				"in %lu ms", compile_stats.compiled + compile_stats.failed + 1, vertex ? "vertex" : "pixel",
 				(unsigned long)strlen(text), shader->cached ? "read from the SD card" : "not on the SD card",
@@ -2108,6 +2215,8 @@ static void shader_describe(const struct shader *shader)
 {
 	uint32_t index;
 
+	if (!debug.log_shaders)
+		return;
 	if (shader->vertex)
 	{
 		const GX2VertexShader *vertex = shader->vertex;
@@ -2775,6 +2884,7 @@ static int prepare_draw(void)
 		}
 		else
 			GX2SetPixelTexture(&texture->gx2, (uint32_t)uniform->sampler_location);
+		texture_used(texture);
 		GX2SetPixelSampler(&made, (uint32_t)uniform->sampler_location);
 		if (parameters->wrap_s == GL_CLAMP_TO_BORDER || parameters->wrap_t == GL_CLAMP_TO_BORDER ||
 			parameters->wrap_r == GL_CLAMP_TO_BORDER)
@@ -3352,7 +3462,8 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 	{
 		struct program *program = object_get(gl.program, _object_program);
 
-		if (gl.draws < 3 || (program && !program->gpu_checked && !watch.check_failed && !debug.no_gpu_check))
+		if ((debug.log_draws && gl.draws < 3) ||
+			(debug.gpu_check && program && !program->gpu_checked && !watch.check_failed && !debug.no_gpu_check))
 			draw_describe(mode, primitive, count, source, index_bytes);
 	}
 	if (source)
@@ -3778,11 +3889,14 @@ static void APIENTRY wiiu_glTexSubImage2D(GLenum target, GLint level, GLint x, G
 	GLsizei height, GLenum format, GLenum type, const GLvoid *pixels)
 {
 	struct texture *texture = bound_texture(target);
+	OSTime start = OSGetSystemTime();
 
 	(void)type;
 	if (texture)
 		texture_upload(texture, target, level, (unsigned long)x, (unsigned long)y, 0, (unsigned long)width,
 			(unsigned long)height, 1, pixels, format);
+	watch.texture_time += OSGetSystemTime() - start;
+	watch.textures++;
 }
 
 static void texture_parameter(struct texture *texture, struct sampler_parameters *sampler, GLenum name,
@@ -3891,9 +4005,11 @@ static void APIENTRY wiiu_glSamplerParameterfv(GLuint name, GLenum parameter, co
 static void APIENTRY wiiu_glGenerateMipmap(GLenum target)
 {
 	struct texture *texture = bound_texture(target);
+	OSTime start = OSGetSystemTime();
 
 	if (texture)
 		generate_mipmaps(texture);
+	watch.texture_time += OSGetSystemTime() - start;
 }
 
 static void APIENTRY wiiu_glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLvoid *pixels)
@@ -3984,7 +4100,6 @@ the whole buffer) */
 static void APIENTRY wiiu_glClear(GLbitfield mask)
 {
 	int color, depth, whole, channels;
-	GX2ContextState *context = wiiu_video_context_state();
 
 	if (!gl_ready() || !wiiu_video_drawing())
 		return;
@@ -4012,9 +4127,8 @@ static void APIENTRY wiiu_glClear(GLbitfield mask)
 			GX2ClearColor(gl.bound_color, gl.clear_color[0], gl.clear_color[1], gl.clear_color[2], gl.clear_color[3]);
 		/* (GX2's clears leave the context state unset: libwhb's
 		WHBGfxClearColor) */
-		if (context)
-			GX2SetContextState(context);
-		gl.uploaded_program = 0;
+		gx2_own_work_done();
+		bind_targets();
 	}
 	else if (color && gl.clear_pixel)
 	{
@@ -4036,9 +4150,8 @@ static void APIENTRY wiiu_glClear(GLbitfield mask)
 		if (!whole)
 			FIRST_USE();
 		GX2ClearDepthStencilEx(gl.bound_depth, gl.clear_depth, (uint8_t)gl.clear_stencil, flags);
-		if (context)
-			GX2SetContextState(context);
-		gl.uploaded_program = 0;
+		gx2_own_work_done();
+		bind_targets();
 	}
 	if (color)
 		targets_written();
@@ -4056,7 +4169,7 @@ static void APIENTRY wiiu_glClear(GLbitfield mask)
 		if (!seen && cleared_count < 32)
 		{
 			cleared[cleared_count++] = gl.draw_framebuffer;
-			if (!watch.check_failed && !debug.no_gpu_check)
+			if (debug.gpu_check && !watch.check_failed && !debug.no_gpu_check)
 				wiiu_log("gl: framebuffer %u's first clear (%s%s%s), color %p tile mode %d, depth %p tile mode %d",
 					gl.draw_framebuffer, color ? "color" : "", color && depth ? " and " : "", depth ? "depth" : "",
 					color ? gl.bound_color->surface.image : NULL, color ? (int)gl.bound_color->surface.tileMode : -1,
@@ -4256,6 +4369,7 @@ static void APIENTRY wiiu_glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLi
 		GX2_TEX_XY_FILTER_MODE_POINT);
 	GX2InitSamplerLOD(&sampler, (float)read->color_level, (float)read->color_level, 0.0f);
 	GX2SetPixelTexture(&source->gx2, (uint32_t)gl.blit_source_location);
+	texture_used(source);
 	GX2SetPixelSampler(&sampler, (uint32_t)gl.blit_source_location);
 	quad_draw(gl.blit_pixel, x0, y0, x1, y1, (float)sx0 / (float)source_width, (float)sy0 / (float)source_height,
 		(float)sx1 / (float)source_width, (float)sy1 / (float)source_height);

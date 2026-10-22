@@ -23,6 +23,9 @@ int wiiu_video_drawing(void);
 /* the time spent waiting for the last frame's flip, and the waits that gave
 up, since the last call (the renderer's frame lines in the log) */
 void wiiu_video_take_waits(OSTime *time, unsigned long *timeouts);
+/* the time spent waiting for flips since the start (the longest frame's
+share of it) */
+OSTime wiiu_video_wait_ticks(void);
 
 /* the end of a frame, after its swap (wiiu_gl.c): what the GPU is done with
 let go */

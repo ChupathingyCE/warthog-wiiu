@@ -292,3 +292,57 @@ Gulch as before. New in the log: each of the first 24 textures' surfaces
 their alignment, swizzle, offsets). New switches: `linear_textures` (the
 old linear textures), `only_tex_format=0xNN` (only that GX2 format sampled,
 the rest as nothing bound), `no_aniso`.
+
+## The textured main menu on the console (2026-10-22)
+
+**Seen on the console.** With the tiled textures the main menu is drawn,
+textured, at 60 fps, and the GamePad moves through it. The owner: a slight
+delay, and an occasional blink when moving through the menus. The log: 120
+frames every 2 s, but frames of 90 to 540 ms while moving through the menus
+(no GPU wait or shader behind them), and 1 to 1.5 s of every 2 s spent
+waiting for flips.
+
+**The blink.** Three things a frame did on the console that it did not in
+Cemu:
+
+- `GX2CopySurface` in the middle of a frame (a texture given texels, now
+  tiled): on the console GX2's copies and clears are draws of GX2's own
+  (Cemu's `GX2_Surface_Copy.cpp` notes the real one sets up draw calls,
+  where Cemu's is a command of its own; libwhb sets its context state again
+  after its clears, `WHBGfxClearColor`). The context state was set again
+  after clears but not after copies, and the layer kept the copy's target
+  as its own: the rest of that frame could be drawn into the texture just
+  copied, not the screen. Now every copy and clear is followed by the
+  context state and the layer's bindings set again (`gx2_own_work_done`).
+- Textures written in place by the CPU (linear ones: glTexSubImage, the
+  mipmaps made on the CPU) while draws already queued still sampled them.
+  Now, as SDL does (`WIIU_SDL_LockTexture`, `WIIU_TextureWaitDone`), each
+  texture keeps the time stamp of its last draw, and a write in place waits
+  for it.
+- The long frames: each program's first draw waited for the whole GPU and
+  wrote ten lines to port.txt, each line opening, appending and closing the
+  file on the SD card (bring-up's `gpu_check`). Of the frames over 80 ms after the
+  first 10 s, three (344, 370 and 89 ms) fell in periods that logged such
+  draws, the 537 ms one in the period that wrote the new profile's files,
+  the 170 ms one with only the game's "event handler function failed"
+  logged; frames of about 90 ms in the first 10 s have no cause in the log. The next run's
+  frame lines say where the longest frame's time went.
+
+**The delay.** The swap waited for the previous frame's flip before copying
+this one (libwhb's `WHBGfxBeginRender` wait, but done one frame late): a
+frame drawn from input read one flip earlier showed a flip later. The wait
+is now for this frame's own flip, right after its swap, so the game's next
+frame, which reads its input first, starts with nothing queued: a frame's
+input to its flip is at most one frame. Swap interval 1 (SDL's
+`WIIU_SDL_SetVSync` with vsync, libwhb's).
+
+**The log.** Off unless gl.txt asks: the first draws, each program's first
+draw and the GPU waits after it (`gpu_check`, new), the first textures'
+surfaces (`log_textures`), each shader read or compiled (`log_shaders`,
+new). The frame line comes every 2 s for 2 minutes, then every 30 s, with
+a second line: where the longest frame's time went (GPU waits, textures,
+shaders, the log's own SD card writes, the flip), the textures given texels
+and in what time, and the writes in place that waited.
+
+Cemu (interpreter) draws Blood Gulch as before with the same build. The
+console's checklist: docs/hardware-test.md.

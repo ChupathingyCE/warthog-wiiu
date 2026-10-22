@@ -14,6 +14,9 @@ Cemu's log, udplogserver on a console) */
 void wiiu_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void wiiu_log_v(const char *format, va_list arguments);
 void wiiu_log_flush(void);
+/* the time spent writing the log's lines to the SD card since the start,
+in OSTime ticks (the renderer's frame lines) */
+long long wiiu_log_write_ticks(void);
 
 /* the log on the TV and the GamePad until the renderer starts
 (wiiu_screen.c) */

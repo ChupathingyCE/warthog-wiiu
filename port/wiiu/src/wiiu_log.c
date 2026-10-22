@@ -42,6 +42,8 @@ static size_t pending_length;
 static int log_held;
 static char held[HELD_LINES][256];
 static int held_count;
+/* the time the SD card's writes took (wiiu_log_write_ticks) */
+static OSTime log_write_time, log_write_start;
 
 static void log_initialize(void)
 {
@@ -69,6 +71,7 @@ static void log_line(const char *line)
 	}
 	if (log_file_failed)
 		return;
+	log_write_start = OSGetSystemTime();
 	/* (opened for each line, while the port is brought up: a crash or a
 	stop loses none, on a console or in an emulator that writes a file out
 	only when it is closed) */
@@ -89,6 +92,12 @@ static void log_line(const char *line)
 	fputc('\n', log_file);
 	fclose(log_file);
 	log_file = NULL;
+	log_write_time += OSGetSystemTime() - log_write_start;
+}
+
+long long wiiu_log_write_ticks(void)
+{
+	return (long long)log_write_time;
 }
 
 /* (the mutex held) a write to stdout or stderr: whole lines out */
