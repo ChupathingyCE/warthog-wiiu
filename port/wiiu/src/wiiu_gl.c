@@ -86,6 +86,7 @@ the first time.
 
 #include "wiiu_port.h"
 #include "wiiu_gx2.h"
+#include "wiiu_shader_cache.h"
 
 #ifndef APIENTRY
 #define APIENTRY
@@ -286,12 +287,14 @@ struct shader
 	GLenum type;
 	char *source;
 	int compiled;
+	int cached;              /* read from the SD card (wiiu_shader_cache.c) */
 	GX2VertexShader *vertex;
 	GX2PixelShader *pixel;
 	unsigned long inputs;
 	/* the texN samplers declared as cube maps and read as arrays of faces
 	(bit N) */
 	unsigned long cube_arrays;
+	uint64_t key;
 	char log[256];
 	int attachments;
 	int deleted;
@@ -520,6 +523,8 @@ enum
 	_retired_memory,
 	_retired_vertex_shader,
 	_retired_pixel_shader,
+	_retired_cached_vertex_shader,
+	_retired_cached_pixel_shader,
 };
 
 static struct
@@ -536,6 +541,10 @@ static void retired_release(void *item, int kind)
 #ifdef HALO_WIIU_CAFEGLSL
 	case _retired_vertex_shader: FreeVertexShader(item); break;
 	case _retired_pixel_shader: FreePixelShader(item); break;
+#endif
+	case _retired_cached_vertex_shader: wiiu_shader_cache_free(1, item); break;
+	case _retired_cached_pixel_shader: wiiu_shader_cache_free(0, item); break;
+#ifdef HALO_WIIU_CAFEGLSL
 #endif
 	default: free(item); break;
 	}
@@ -1546,7 +1555,7 @@ static void compiler_start(void)
 
 static struct
 {
-	unsigned long compiled, failed;
+	unsigned long compiled, failed, cached;
 	OSTime time;
 } compile_stats;
 
@@ -1563,7 +1572,6 @@ static int shader_compile(struct shader *shader)
 	shader->compiled = 1;
 	if (!shader->source)
 		return 0;
-	compiler_start();
 	text = shader_text(shader->source, vertex);
 	if (!text)
 		return 0;
@@ -1572,12 +1580,45 @@ static int shader_compile(struct shader *shader)
 		shader_cube_arrays(text, &shader->cube_arrays);
 	start = OSGetSystemTime();
 	shader->log[0] = '\0';
+	/* (compiled in an earlier run: the text and the compiler the same) */
+	{
+		uint64_t key = 14695981039346656037ULL;
+		const char *version = GetGLSLCompilerVersion();
+		const char *byte;
+
+		for (byte = version; *byte; byte++)
+			key = (key ^ (unsigned char)*byte) * 1099511628211ULL;
+		for (byte = text; *byte; byte++)
+			key = (key ^ (unsigned char)*byte) * 1099511628211ULL;
+		shader->key = key;
+	}
+	if (vertex)
+		shader->vertex = wiiu_shader_cache_load(shader->key, 1);
+	else
+		shader->pixel = wiiu_shader_cache_load(shader->key, 0);
+	if (shader->vertex || shader->pixel)
+	{
+		shader->cached = 1;
+		compile_stats.cached++;
+		mode = GX2_SHADER_MODE_UNIFORM_REGISTER;
+	}
+	else
+	{
+	compiler_start();
 	if (vertex)
 		mode = CompileVertexShader(text, GLSL_COMPILE_REGISTER, &shader->vertex, shader->log, sizeof(shader->log),
 			GLSL_COMPILER_FLAG_NONE);
 	else
 		mode = CompilePixelShader(text, GLSL_COMPILE_REGISTER, &shader->pixel, shader->log, sizeof(shader->log),
 			GLSL_COMPILER_FLAG_NONE);
+	if (mode != GLSL_SHADER_MODE_ERROR)
+	{
+		if (vertex)
+			wiiu_shader_cache_store(shader->key, 1, shader->vertex);
+		else
+			wiiu_shader_cache_store(shader->key, 0, shader->pixel);
+	}
+	}
 	compile_stats.time += OSGetSystemTime() - start;
 	if (mode == GLSL_SHADER_MODE_ERROR)
 	{
@@ -1607,8 +1648,8 @@ static int shader_compile(struct shader *shader)
 	if (compile_stats.compiled <= 4)
 		shader_describe(shader);
 	if (compile_stats.compiled == 1 || compile_stats.compiled % 25 == 0)
-		wiiu_log("gl: %lu shaders compiled (%lu ms in all), %lu failed", compile_stats.compiled,
-			(unsigned long)OSTicksToMilliseconds(compile_stats.time), compile_stats.failed);
+		wiiu_log("gl: %lu shaders ready (%lu from the SD card's cache, %lu ms in all), %lu failed", compile_stats.compiled,
+			compile_stats.cached, (unsigned long)OSTicksToMilliseconds(compile_stats.time), compile_stats.failed);
 	if (vertex)
 	{
 		uint32_t index;
@@ -1670,9 +1711,9 @@ static void shader_describe(const struct shader *shader)
 static void shader_release(struct shader *shader)
 {
 	if (shader->vertex)
-		retire(shader->vertex, _retired_vertex_shader);
+		retire(shader->vertex, shader->cached ? _retired_cached_vertex_shader : _retired_vertex_shader);
 	if (shader->pixel)
-		retire(shader->pixel, _retired_pixel_shader);
+		retire(shader->pixel, shader->cached ? _retired_cached_pixel_shader : _retired_pixel_shader);
 	free(shader->source);
 	free(shader);
 }
