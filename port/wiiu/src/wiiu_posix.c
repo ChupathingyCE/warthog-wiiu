@@ -174,6 +174,19 @@ ssize_t pwrite(int descriptor, const void *buffer, size_t count, off_t offset)
 		lseek(descriptor, previous, SEEK_SET);
 	}
 	OSUnlockMutex(&positional_mutex);
+	/* (the first writes that take nothing, logged: the SD card's device
+	refusing a file's writes shows here) */
+	if (result <= 0 && count)
+	{
+		static int logged;
+
+		if (logged < 16)
+		{
+			logged++;
+			wiiu_log("files: write of %u bytes at %lld to %d gave %d (errno %d)",
+				(unsigned)count, (long long)offset, descriptor, (int)result, errno);
+		}
+	}
 	return result;
 }
 
