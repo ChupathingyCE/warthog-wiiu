@@ -60,6 +60,7 @@ static void proc_end(void)
 	}
 	wiiu_log_hold(0);
 	wiiu_screen_stop();
+	wiiu_video_shutdown();
 	wiiu_log("system: the screens let go");
 	wiiu_log_flush();
 	wiiu_log("system: ProcUIShutdown next");

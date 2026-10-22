@@ -49,11 +49,15 @@ stopped when the foreground is released and at the end */
 void wiiu_audio_startup(void);
 void wiiu_audio_shutdown(void);
 
-/* the TV's picture (wiiu_video.c) */
+/* the TV's and the GamePad's picture, through GX2 (wiiu_video.c): started
+with the game's device, cleared every frame while the game draws nothing
+(wiiu_video_idle), shut down at the end */
 #define WIIU_SCREEN_WIDTH 1280
 #define WIIU_SCREEN_HEIGHT 720
 int wiiu_video_initialize(void);
 void wiiu_video_swap(void);
+void wiiu_video_idle(void);
+void wiiu_video_shutdown(void);
 
 /* the system's messages (wiiu_proc.c): 0 once the game is to end */
 int wiiu_proc_update(void);
