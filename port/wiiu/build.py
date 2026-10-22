@@ -240,6 +240,14 @@ def add_arguments(parser: Any) -> None:
     )
 
 
+    parser.add_argument(
+        "--wiiu-gl-switches",
+        action="store_true",
+        help="the Wii U renderer's bring-up switches, read from gl.txt beside "
+             "halo.rpx (src/wiiu_gl.c); a normal build never reads the file",
+    )
+
+
 def configure_inputs(port: ConsolePort) -> List[Path]:
     """Files whose change must re-run configure.py."""
     return [port.path("src"), port.path("platform"), port.path("include"), port.path("build.py"),
@@ -453,6 +461,7 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
         target,
         *defines,
         *([f"-DHALO_WIIU_CAFEGLSL -isystem {_quote(cafeglsl / 'include')}"] if cafeglsl else []),
+        *(["-DHALO_WIIU_GL_SWITCHES"] if getattr(sln.args, "wiiu_gl_switches", False) else []),
         " ".join(CONSOLE_FLAGS),
         version_define,
         f"-iquote {_quote(game)}",

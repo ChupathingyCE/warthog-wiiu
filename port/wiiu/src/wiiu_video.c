@@ -21,13 +21,12 @@ frame (SDL's WIIU_SDL_RenderPresent);
 - a frame begun only once the previous swap is shown (libwhb's
 WHBGfxBeginRender).
 
-The renderer itself (d3d8_gl.c over wiiu_gl.c) is not up yet
-(port/wiiu/STATUS.md, milestone 3): until it is, the screens are cleared to
-one color every frame (wiiu_video_idle), so that GX2 is seen to work (with
-CafeGLSL in the build, a triangle drawn over it, its shaders compiled from
-GLSL at start-up), and
-the game runs without a picture, as the dedicated server does. The log's
-text screens (wiiu_screen.c) are let go when GX2 starts.
+The game's renderer (port/linux/src/d3d8_gl.c) draws through the OpenGL of
+wiiu_gl.c, into its own targets and then into the color buffer here, which
+is OpenGL's default framebuffer (wiiu_gx2.h). Until it presents its first
+picture the screens are cleared to one color every frame (wiiu_video_idle);
+a build without CafeGLSL has no renderer and runs without a picture, as the
+dedicated server does. The log's text screens (wiiu_screen.c) are let go when GX2 starts.
 */
 
 #include <malloc.h>
@@ -52,15 +51,8 @@ text screens (wiiu_screen.c) are let go when GX2 starts.
 #include <gx2r/mem.h>
 #include <proc_ui/procui.h>
 
-#ifdef HALO_WIIU_CAFEGLSL
-#include <coreinit/cache.h>
-#include <gx2/draw.h>
-#include <gx2/shaders.h>
-#include <gx2/utils.h>
-#include <cafeglsl/CafeGLSLCompiler.h>
-#endif
-
 #include "wiiu_port.h"
+#include "wiiu_gx2.h"
 
 /* (libwhb's WHB_GFX_COMMAND_BUFFER_POOL_SIZE) */
 #define VIDEO_COMMAND_BUFFER_POOL_SIZE 0x400000
@@ -88,11 +80,6 @@ static GX2ColorBuffer color_buffer;
 static GX2DepthBuffer depth_buffer;
 static GX2ContextState *context_state;
 static MEMHeapHandle heap_mem1, heap_foreground;
-
-#ifdef HALO_WIIU_CAFEGLSL
-static void triangle_initialize(void);
-static void triangle_draw(void);
-#endif
 
 /* ---------- the heaps (SDL_wiiu_gfx_heap.c, libwhb's gfx_heap.c) */
 
@@ -382,11 +369,13 @@ int wiiu_video_initialize(void)
 	wiiu_log("video: GX2 started, TV scan mode %d, GamePad mode %d, drawing %ux%u",
 		(int)GX2GetSystemTVScanMode(), (int)drc_render_mode,
 		(unsigned int)draw_width, (unsigned int)draw_height);
-	wiiu_log("video: no renderer yet: the screens are cleared, the game runs without a picture");
 #ifdef HALO_WIIU_CAFEGLSL
-	triangle_initialize();
-#endif
+	/* (the game's renderer draws through wiiu_gl.c) */
+	return 1;
+#else
+	wiiu_log("video: no shader compiler in this build: the screens are cleared, the game runs without a picture");
 	return 0;
+#endif
 }
 
 /* (proc_end, after ProcUI says to exit: SDL's WIIU_VideoQuit) */
@@ -405,123 +394,6 @@ void wiiu_video_shutdown(void)
 	video_state = -1;
 	wiiu_log("video: GX2 shut down");
 }
-
-/* ---------- the shader path's first test (port/wiiu/docs/renderer.md) */
-
-#ifdef HALO_WIIU_CAFEGLSL
-/* One triangle drawn over the idle frame's clear, its shaders compiled at
-start-up from GLSL by CafeGLSL, as the renderer's would be: the compiler
-seen to work on the console, and its time for one pair in the log. The
-draw's steps are the ones Butter and Jelly's gx2_video.cpp takes (a fetch
-shader for the attribute stream, the shaders set, the buffer, the draw). */
-
-static const char triangle_vertex_source[] =
-	"#version 410 core\n"
-	"layout(location = 0) in vec2 position;\n"
-	"layout(location = 1) in vec3 color;\n"
-	"out vec3 v_color;\n"
-	"void main()\n"
-	"{\n"
-	"	v_color = color;\n"
-	"	gl_Position = vec4(position, 0.0, 1.0);\n"
-	"}\n";
-
-static const char triangle_pixel_source[] =
-	"#version 410 core\n"
-	"in vec3 v_color;\n"
-	"out vec4 fragment_color;\n"
-	"void main()\n"
-	"{\n"
-	"	fragment_color = vec4(v_color, 1.0);\n"
-	"}\n";
-
-/* (x, y, red, green, blue) */
-static const float triangle_vertices[3][5] =
-{
-	{ 0.0f, 0.6f, 1.0f, 0.2f, 0.2f },
-	{ -0.5f, -0.5f, 0.2f, 1.0f, 0.2f },
-	{ 0.5f, -0.5f, 0.2f, 0.4f, 1.0f },
-};
-
-static int triangle_ready;
-static GX2ShaderMode triangle_mode;
-static GX2VertexShader *triangle_vertex_shader;
-static GX2PixelShader *triangle_pixel_shader;
-static GX2FetchShader triangle_fetch_shader;
-static void *triangle_fetch_program;
-static float *triangle_buffer;
-
-static void triangle_initialize(void)
-{
-	GX2AttribStream streams[2];
-	uint32_t fetch_size;
-	char log[1024];
-	OSTime start, compiled;
-
-	start = OSGetSystemTime();
-	InitGLSLCompiler();
-	compiled = OSGetSystemTime();
-	wiiu_log("video: CafeGLSL %s started in %u ms", GetGLSLCompilerVersion(),
-		(unsigned int)OSTicksToMilliseconds(compiled - start));
-	log[0] = 0;
-	start = OSGetSystemTime();
-	triangle_mode = CompileShaderPair(triangle_vertex_source, triangle_pixel_source, GLSL_COMPILE_AUTO,
-		&triangle_vertex_shader, &triangle_pixel_shader, log, sizeof(log), GLSL_COMPILER_FLAG_NONE);
-	compiled = OSGetSystemTime();
-	if (triangle_mode == GLSL_SHADER_MODE_ERROR)
-	{
-		wiiu_log("video: the test triangle's shaders did not compile: %s", log);
-		return;
-	}
-	wiiu_log("video: the test triangle's shaders compiled in %u us (mode %d, %u and %u bytes of program)",
-		(unsigned int)OSTicksToMicroseconds(compiled - start), (int)triangle_mode,
-		(unsigned int)triangle_vertex_shader->size, (unsigned int)triangle_pixel_shader->size);
-	GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, triangle_vertex_shader->program, triangle_vertex_shader->size);
-	GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, triangle_pixel_shader->program, triangle_pixel_shader->size);
-
-	/* (the attributes' streams: two floats of position, three of color, in
-	one buffer) */
-	memset(streams, 0, sizeof(streams));
-	streams[0].location = 0;
-	streams[0].buffer = 0;
-	streams[0].offset = 0;
-	streams[0].format = GX2_ATTRIB_FORMAT_FLOAT_32_32;
-	streams[0].type = GX2_ATTRIB_INDEX_PER_VERTEX;
-	streams[0].mask = GX2_SEL_MASK(GX2_SQ_SEL_X, GX2_SQ_SEL_Y, GX2_SQ_SEL_0, GX2_SQ_SEL_1);
-	streams[0].endianSwap = GX2_ENDIAN_SWAP_DEFAULT;
-	streams[1] = streams[0];
-	streams[1].location = 1;
-	streams[1].offset = 2 * sizeof(float);
-	streams[1].format = GX2_ATTRIB_FORMAT_FLOAT_32_32_32;
-	streams[1].mask = GX2_SEL_MASK(GX2_SQ_SEL_X, GX2_SQ_SEL_Y, GX2_SQ_SEL_Z, GX2_SQ_SEL_1);
-	fetch_size = GX2CalcFetchShaderSizeEx(2, GX2_FETCH_SHADER_TESSELLATION_NONE, GX2_TESSELLATION_MODE_DISCRETE);
-	triangle_fetch_program = memalign(GX2_SHADER_PROGRAM_ALIGNMENT, fetch_size);
-	triangle_buffer = memalign(GX2_VERTEX_BUFFER_ALIGNMENT, sizeof(triangle_vertices));
-	if (!triangle_fetch_program || !triangle_buffer)
-		return;
-	GX2InitFetchShaderEx(&triangle_fetch_shader, triangle_fetch_program, 2, streams,
-		GX2_FETCH_SHADER_TESSELLATION_NONE, GX2_TESSELLATION_MODE_DISCRETE);
-	GX2Invalidate(GX2_INVALIDATE_MODE_CPU_SHADER, triangle_fetch_program, fetch_size);
-	memcpy(triangle_buffer, triangle_vertices, sizeof(triangle_vertices));
-	GX2Invalidate(GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER, triangle_buffer, sizeof(triangle_vertices));
-	triangle_ready = 1;
-}
-
-static void triangle_draw(void)
-{
-	if (!triangle_ready)
-		return;
-	/* (no depth test or culling: SDL's renderer's state) */
-	GX2SetDepthOnlyControl(FALSE, FALSE, GX2_COMPARE_FUNC_NEVER);
-	GX2SetCullOnlyControl(GX2_FRONT_FACE_CCW, FALSE, FALSE);
-	GX2SetShaderMode(triangle_mode);
-	GX2SetFetchShader(&triangle_fetch_shader);
-	GX2SetVertexShader(triangle_vertex_shader);
-	GX2SetPixelShader(triangle_pixel_shader);
-	GX2SetAttribBuffer(0, sizeof(triangle_vertices), sizeof(triangle_vertices[0]), triangle_buffer);
-	GX2DrawEx(GX2_PRIMITIVE_MODE_TRIANGLES, 3, 0, 1);
-}
-#endif
 
 /* ---------- the frame */
 
@@ -553,6 +425,8 @@ void wiiu_video_swap(void)
 	GX2SwapScanBuffers();
 	GX2Flush();
 	GX2SetContextState(context_state);
+	/* (what the GPU is done with let go: the renderer's) */
+	wiiu_gl_frame_end();
 	/* (the screens enabled once the first frame is there) */
 	if (!video_screens_enabled)
 	{
@@ -567,15 +441,34 @@ void wiiu_video_swap(void)
 the screens cleared to one color) */
 void wiiu_video_idle(void)
 {
-	if (video_state != 1 || !video_foreground)
+	if (video_state != 1 || !video_foreground || wiiu_gl_drawing())
 		return;
 	GX2ClearColor(&color_buffer, VIDEO_IDLE_RED, VIDEO_IDLE_GREEN, VIDEO_IDLE_BLUE, 1.0f);
 	GX2ClearDepthStencilEx(&depth_buffer, depth_buffer.depthClear, depth_buffer.stencilClear,
 		GX2_CLEAR_FLAGS_DEPTH | GX2_CLEAR_FLAGS_STENCIL);
 	/* (GX2's clears leave the context state unset: libwhb's WHBGfxClearColor) */
 	GX2SetContextState(context_state);
-#ifdef HALO_WIIU_CAFEGLSL
-	triangle_draw();
-#endif
 	wiiu_video_swap();
+}
+
+/* ---------- what the renderer draws into (wiiu_gx2.h) */
+
+GX2ColorBuffer *wiiu_video_screen_color(void)
+{
+	return video_state == 1 ? &color_buffer : NULL;
+}
+
+GX2DepthBuffer *wiiu_video_screen_depth(void)
+{
+	return video_state == 1 ? &depth_buffer : NULL;
+}
+
+GX2ContextState *wiiu_video_context_state(void)
+{
+	return video_state == 1 ? context_state : NULL;
+}
+
+int wiiu_video_drawing(void)
+{
+	return video_state == 1 && video_foreground;
 }
