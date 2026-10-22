@@ -193,6 +193,22 @@ def _wut_dir(sln: Any) -> Optional[Path]:
     return None
 
 
+def _cafeglsl_dir(sln: Any) -> Optional[Path]:
+    """CafeGLSL (MIT, github.com/Exzap/CafeGLSL), the GLSL compiler for
+    Latte: its static library and headers"""
+    candidates = [
+        getattr(sln.args, "cafeglsl", None),
+        Path(os.environ["DEVKITPRO"]) / "portlibs" / "wiiu" if "DEVKITPRO" in os.environ else None,
+        Path("/opt/devkitpro/portlibs/wiiu"),
+    ]
+    for c in candidates:
+        if c:
+            p = Path(c).expanduser().resolve()
+            if (p / "lib" / "libcafeglsl.a").is_file() and (p / "include" / "cafeglsl" / "CafeGLSLCompiler.h").is_file():
+                return p
+    return None
+
+
 def _devkitpro_tool(devkitpro: Path, name: str) -> Optional[Path]:
     for candidate in (devkitpro / "tools" / "bin" / name, Path("/opt/devkitpro/tools/bin") / name):
         if candidate.is_file():
@@ -213,6 +229,14 @@ def add_arguments(parser: Any) -> None:
         metavar="DIR",
         type=Path,
         help="wut directory for `ninja wiiu` (default: /opt/devkitpro/wut)",
+    )
+    parser.add_argument(
+        "--cafeglsl",
+        metavar="DIR",
+        type=Path,
+        help="CafeGLSL's Wii U library (the release's wiiu-ppc folder, or the "
+             "portlib in /opt/devkitpro/portlibs/wiiu): the renderer's shader "
+             "compiler (port/wiiu/docs/renderer.md); without it, no shaders",
     )
 
 
@@ -422,10 +446,13 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
     for source in sorted((port_dir / "platform").glob("*.c")):
         add_object(source, f"{platform_cflags} -I{_quote(port_dir / 'src')}")
 
-    # the port's own units: the console, through wut
+    # the port's own units: the console, through wut (and CafeGLSL, the
+    # shader compiler, when there is one)
+    cafeglsl = _cafeglsl_dir(sln)
     console_cflags = " ".join([
         target,
         *defines,
+        *([f"-DHALO_WIIU_CAFEGLSL -isystem {_quote(cafeglsl / 'include')}"] if cafeglsl else []),
         " ".join(CONSOLE_FLAGS),
         version_define,
         f"-iquote {_quote(game)}",
@@ -467,7 +494,8 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
         rule="wiiu_elf",
         inputs=objects,
         implicit_outputs=[build_dir / "halo.map"],
-        variables={"ldflags": ldflags, "libs": "-lwut -lm"},
+        variables={"ldflags": ldflags,
+                   "libs": (f"-L{_quote(cafeglsl / 'lib')} -lcafeglsl -lstdc++ " if cafeglsl else "") + "-lwut -lm"},
     )
     n.build(outputs=rpx, rule="wiiu_rpx", inputs=elf)
     n.build(outputs="wiiu", rule="phony", inputs=rpx)

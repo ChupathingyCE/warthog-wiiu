@@ -6,7 +6,7 @@ what works, what does not, and the next step.
 
 ## Requirements
 
-devkitPro's devkitPPC and wut (`/opt/devkitpro`, or `--devkitppc DIR` and `--wut DIR`), with `elf2rpl`; `wuhbtool` for `--wuhb`.
+devkitPro's devkitPPC and wut (`/opt/devkitpro`, or `--devkitppc DIR` and `--wut DIR`), with `elf2rpl`; `wuhbtool` for `--wuhb`. For shaders, CafeGLSL's Wii U library (v1.0.0-rc1 or later: its portlib in `/opt/devkitpro/portlibs/wiiu`, or `--cafeglsl DIR`); docs/renderer.md.
 
 ## Build
 
