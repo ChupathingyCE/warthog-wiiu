@@ -11,8 +11,11 @@ the system's events (wiiu_platform.c), as xinput_sdl.c does.
 
 #include "platform.h"
 #include "sdl_platform.h"
+#include "port_config.h"
 
+#include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "wiiu_port.h"
@@ -137,9 +140,155 @@ int halo_keyboard_action_shown(int action, char *shown, unsigned long size)
 	return 0;
 }
 
+/* ---------- debug.test_input: scripted input on the first controller
+
+As xinput_sdl.c gives it on the desktop, with the same settings, for the
+automated tests and for testing the menus without a hand on a controller
+(Cemu overnight): "menu:<buttons>" presses the buttons one a second, from
+the first poll (a, b, x, y, lb and rb the white and black buttons, up,
+down, left, right, start, back, or wait for none), each for the first 150 ms
+of its second; "bot:<seed>" is a scripted player that walks and strafes in
+circles, turns, fires every few seconds, jumps now and then and throws a
+grenade every seven seconds; "look:<seed>" stands still, turning and
+looking up and down. Over whatever the controller itself gives. */
+
+static int test_input_holding_action;
+static DWORD test_input_holding_action_since;
+static char test_input_menu[512];
+static DWORD test_input_menu_since;
+
+/* the automated tests (port/linux/game/network_test.c): the scripted player
+stands still, holding the action button (X: picking up, swapping weapons)
+after a second */
 void test_input_hold_action(int hold)
 {
-	(void)hold;
+	if (hold && !test_input_holding_action)
+		test_input_holding_action_since = GetTickCount();
+	test_input_holding_action = hold;
+}
+
+/* the button pressed now (NULL for none) */
+static const char *test_input_menu_token(size_t *length)
+{
+	DWORD elapsed = GetTickCount() - test_input_menu_since;
+	DWORD step = elapsed / 1000;
+	const char *token = test_input_menu;
+
+	if (!test_input_menu[0] || elapsed % 1000 >= 150)
+		return NULL;
+	for (;;)
+	{
+		token += strspn(token, " ,");
+		*length = strcspn(token, " ,");
+		if (!*length)
+			return NULL;
+		if (!step)
+			return token;
+		step--;
+		token += *length;
+	}
+}
+
+static void test_input_menu_gamepad(XINPUT_GAMEPAD *pad)
+{
+	static const struct
+	{
+		const char *name;
+		int analog;
+		WORD digital;
+	} buttons[] =
+	{
+		{ "a", XINPUT_GAMEPAD_A, 0 },
+		{ "b", XINPUT_GAMEPAD_B, 0 },
+		{ "x", XINPUT_GAMEPAD_X, 0 },
+		{ "y", XINPUT_GAMEPAD_Y, 0 },
+		{ "lb", XINPUT_GAMEPAD_WHITE, 0 },
+		{ "rb", XINPUT_GAMEPAD_BLACK, 0 },
+		{ "up", -1, XINPUT_GAMEPAD_DPAD_UP },
+		{ "down", -1, XINPUT_GAMEPAD_DPAD_DOWN },
+		{ "left", -1, XINPUT_GAMEPAD_DPAD_LEFT },
+		{ "right", -1, XINPUT_GAMEPAD_DPAD_RIGHT },
+		{ "start", -1, XINPUT_GAMEPAD_START },
+		{ "back", -1, XINPUT_GAMEPAD_BACK },
+	};
+	size_t length;
+	const char *token = test_input_menu_token(&length);
+	unsigned int index;
+
+	if (!token)
+		return;
+	for (index = 0; index < sizeof(buttons) / sizeof(buttons[0]); index++)
+	{
+		if (strlen(buttons[index].name) == length && !strncmp(token, buttons[index].name, length))
+		{
+			if (buttons[index].analog >= 0)
+				pad->bAnalogButtons[buttons[index].analog] = 255;
+			else
+				pad->wButtons |= buttons[index].digital;
+			return;
+		}
+	}
+}
+
+static void test_input_gamepad(XINPUT_GAMEPAD *pad)
+{
+	static int checked;
+	static int seed = -1;
+	static int looking;
+	double t;
+
+	if (!checked)
+	{
+		const char *setting = config_string("debug.test_input");
+
+		checked = 1;
+		if (!strncmp(setting, "menu:", 5))
+		{
+			snprintf(test_input_menu, sizeof(test_input_menu), "%s", setting + 5);
+			test_input_menu_since = GetTickCount();
+		}
+		else if (!strncmp(setting, "bot:", 4))
+			seed = atoi(setting + 4);
+		else if (!strcmp(setting, "bot"))
+			seed = 0;
+		else if (!strncmp(setting, "look:", 5))
+		{
+			seed = atoi(setting + 5);
+			looking = 1;
+		}
+		if (setting[0])
+			platform_log("input: scripted input on the first controller (%s)", setting);
+	}
+	if (test_input_menu[0])
+	{
+		test_input_menu_gamepad(pad);
+		return;
+	}
+	if (seed < 0)
+		return;
+	if (test_input_holding_action)
+	{
+		/* (standing still, the button held from a second on) */
+		if (GetTickCount() - test_input_holding_action_since >= 1000)
+			pad->bAnalogButtons[XINPUT_GAMEPAD_X] = 255;
+		return;
+	}
+	t = (double)GetTickCount() / 1000.0 + seed * 1.7;
+	if (looking)
+	{
+		pad->sThumbRX = (SHORT)(sin(t * 0.5) * 14000.0);
+		pad->sThumbRY = (SHORT)(sin(t * 0.3) * 32000.0);
+		return;
+	}
+	pad->sThumbLY = (SHORT)(sin(t * 0.9) * 32000.0);
+	pad->sThumbLX = (SHORT)(cos(t * 0.6 + seed) * 20000.0);
+	pad->sThumbRX = (SHORT)(sin(t * 0.4) * 14000.0);
+	if (fmod(t, 3.0) < 0.3)
+		pad->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] = 255;
+	if (fmod(t, 5.0) < 0.1)
+		pad->bAnalogButtons[XINPUT_GAMEPAD_A] = 255;
+	if (fmod(t, 7.0) < 0.2)
+		pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = 255;
 }
 
 /* ---------- XAPI */
@@ -242,6 +391,8 @@ DWORD WINAPI XInputGetState(HANDLE device, PXINPUT_STATE state)
 	state->Gamepad.sThumbLY = pad.thumb_ly;
 	state->Gamepad.sThumbRX = pad.thumb_rx;
 	state->Gamepad.sThumbRY = pad.thumb_ry;
+	if (port == 0)
+		test_input_gamepad(&state->Gamepad);
 	return ERROR_SUCCESS;
 }
 

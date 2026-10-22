@@ -132,7 +132,10 @@ never reads the file, so every switch stays off. */
 static struct
 {
 	int loaded;
-	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips;
+	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one;
+	unsigned long log_at;
+	GLuint skip_programs[8];
+	int skip_count;
 	unsigned long log_frame_number;
 } debug;
 
@@ -161,6 +164,13 @@ static void debug_load(void)
 		if (!strcmp(word, "blit_green")) debug.blit_green = 1;
 		if (!strcmp(word, "trace")) debug.trace = 1;
 		if (!strcmp(word, "native_strips")) debug.native_strips = 1;
+		if (!strcmp(word, "no_mips")) debug.no_mips = 1;
+		if (!strcmp(word, "log_big")) debug.log_big = 1;
+		if (!strcmp(word, "dst_alpha_one")) debug.dst_alpha_one = 1;
+		sscanf(word, "log_at=%lu", &debug.log_at);
+		if (debug.skip_count < 8 && sscanf(word, "skip_program=%u", &debug.skip_programs[debug.skip_count]) == 1)
+			debug.skip_count++;
+		if (!strcmp(word, "log_textures")) debug.log_textures = 1;
 		if (!strcmp(word, "screen_magenta")) debug.screen_magenta = 1;
 		if (sscanf(word, "log_frame=%lu", &debug.log_frame_number) == 1)
 			debug.log_frame = 1;
@@ -220,6 +230,7 @@ struct texture
 	void *memory;            /* the surface's image and mipmaps, one block */
 	unsigned long bytes;
 	int compressed;          /* 0, or DXT's bytes a block (8 or 16) */
+	int tiled;               /* GX2's own tiling: written through a copy */
 	int depth_format;
 	GLint swizzle[4];
 	GLint base_level, max_level;
@@ -438,6 +449,7 @@ static struct
 	unsigned long frame;
 	unsigned long draws;
 	unsigned long frame_draws;
+	OSTime start;
 } gl;
 
 static void state_defaults(void)
@@ -771,7 +783,11 @@ static int texture_allocate(struct texture *texture, GLenum target, GLenum inter
 	surface->aa = GX2_AA_MODE1X;
 	/* (a color buffer too when it is RGBA8: any texture can be drawn into) */
 	surface->use = compressed ? GX2_SURFACE_USE_TEXTURE : GX2_SURFACE_USE_TEXTURE_COLOR_BUFFER_TV;
-	surface->tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+	/* (cube maps and volumes in GX2's own tiling, as games have them: their
+	texels go in through a linear copy, texture_upload; Cemu read the
+	linear cube maps' texels as black) */
+	texture->tiled = target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_3D;
+	surface->tileMode = texture->tiled ? GX2_TILE_MODE_DEFAULT : GX2_TILE_MODE_LINEAR_ALIGNED;
 	GX2CalcSurfaceSizeAndAlignment(surface);
 	/* (level 1 is mipLevelOffset[0] after the image when the levels follow
 	it: GX2CalcSurfaceSizeAndAlignment's offset0) */
@@ -791,6 +807,27 @@ static int texture_allocate(struct texture *texture, GLenum target, GLenum inter
 	texture->gx2.viewNumSlices = target == GL_TEXTURE_CUBE_MAP ? 6 : 1;
 	texture->levels = (int)surface->mipLevels;
 	texture_component_map(texture);
+	debug_load();
+	if (debug.log_textures)
+	{
+		static int logged;
+
+		if (logged++ < 40)
+		{
+			int level;
+			char text[160];
+			int length = 0;
+
+			for (level = 0; level < texture->levels && level < 6; level++)
+				length += snprintf(text + length, sizeof(text) - (size_t)length, " %u/%u",
+					(unsigned int)GX2GetSurfaceMipPitch(surface, (uint32_t)level),
+					(unsigned int)GX2GetSurfaceMipSliceSize(surface, (uint32_t)level));
+			wiiu_log("gl: texture %lux%lux%lu format 0x%x target 0x%x, %d levels, pitch %u, image %u, offsets %u %u %u; "
+				"pitch/slice by level:%s", width, height, depth, (unsigned int)format, target, texture->levels,
+				(unsigned int)surface->pitch, (unsigned int)surface->imageSize, (unsigned int)surface->mipLevelOffset[0],
+				(unsigned int)surface->mipLevelOffset[1], (unsigned int)surface->mipLevelOffset[2], text);
+		}
+	}
 	return 1;
 }
 
@@ -831,6 +868,82 @@ static unsigned char *texture_level(struct texture *texture, int level, unsigned
 	return base;
 }
 
+/* rows of texels or of DXT blocks copied, BGRA's swapped to RGBA */
+static void texture_rows(unsigned char *destination, unsigned long pitch, const unsigned char *source,
+	unsigned long rows, unsigned long row_bytes, unsigned long width, int bgra)
+{
+	unsigned long row;
+
+	for (row = 0; row < rows; row++)
+	{
+		unsigned char *out = destination + row * pitch;
+
+		if (bgra)
+		{
+			unsigned long texel;
+
+			for (texel = 0; texel < width; texel++)
+			{
+				out[texel * 4 + 0] = source[texel * 4 + 2];
+				out[texel * 4 + 1] = source[texel * 4 + 1];
+				out[texel * 4 + 2] = source[texel * 4 + 0];
+				out[texel * 4 + 3] = source[texel * 4 + 3];
+			}
+		}
+		else
+			memcpy(out, source, row_bytes);
+		source += row_bytes;
+	}
+}
+
+/* a tiled texture's level: each slice (a cube map's face, a volume's
+slice) written into a linear surface of its own and copied into place by
+GX2CopySurface, which tiles it (decaf's gx2_surface.cpp and gx2_addrlib.cpp:
+the copy goes through the address library's tiling of both surfaces). The
+linear surface is let go two frames on, as the GPU may copy later. A whole
+level at a time: the renderer writes cube maps and volumes no other way. */
+static void texture_upload_tiled(struct texture *texture, int level, unsigned long z, unsigned long width,
+	unsigned long height, unsigned long depth, const void *data, GLenum format)
+{
+	unsigned long block = texture->compressed ? 4 : 1;
+	unsigned long element_bytes = texture->compressed ? (unsigned long)texture->compressed : texel_bytes(texture);
+	unsigned long rows = (height + block - 1) / block;
+	unsigned long row_bytes = (width + block - 1) / block * element_bytes;
+	int bgra = !texture->compressed && format == GL_BGRA && element_bytes == 4;
+	const unsigned char *source = data;
+	unsigned long slice;
+
+	for (slice = 0; slice < (depth ? depth : 1); slice++)
+	{
+		GX2Surface staging;
+		void *memory;
+
+		memset(&staging, 0, sizeof(staging));
+		staging.dim = GX2_SURFACE_DIM_TEXTURE_2D;
+		staging.width = (uint32_t)width;
+		staging.height = (uint32_t)height;
+		staging.depth = 1;
+		staging.mipLevels = 1;
+		staging.format = texture->gx2.surface.format;
+		staging.aa = GX2_AA_MODE1X;
+		staging.use = GX2_SURFACE_USE_TEXTURE;
+		staging.tileMode = GX2_TILE_MODE_LINEAR_ALIGNED;
+		GX2CalcSurfaceSizeAndAlignment(&staging);
+		memory = gpu_allocate(staging.imageSize, staging.alignment);
+		if (!memory)
+			return;
+		staging.image = memory;
+		texture_rows(memory, staging.pitch * element_bytes, source, rows, row_bytes, width, bgra);
+		gpu_written(memory, staging.imageSize, GX2_INVALIDATE_MODE_CPU_TEXTURE);
+		GX2CopySurface(&staging, 0, 0, &texture->gx2.surface, (uint32_t)level, (uint32_t)(z + slice));
+		retire(memory, _retired_memory);
+		source += rows * row_bytes;
+	}
+	GX2Invalidate(GX2_INVALIDATE_MODE_TEXTURE, texture->memory, texture->bytes);
+	if (level + 1 > texture->defined_levels)
+		texture->defined_levels = level + 1;
+}
+
 /* copies texels into a level (rows of texels, or of DXT blocks), BGRA's
 swapped to the surface's RGBA */
 static void texture_upload(struct texture *texture, GLenum target, int level, unsigned long x, unsigned long y,
@@ -847,9 +960,23 @@ static void texture_upload(struct texture *texture, GLenum target, int level, un
 
 	if (!texture->memory || !data || level >= texture->levels)
 		return;
-	base = texture_level(texture, level, &pitch, &slice_bytes);
+	if (debug.log_textures && level == 0 && texture->width <= 16 && texture->height <= 16 && !texture->compressed)
+	{
+		static int logged;
+		const unsigned char *texel = data;
+
+		if (logged++ < 30)
+			wiiu_log("gl: small texture %lux%lu (0x%x data): %02x%02x%02x%02x %02x%02x%02x%02x", texture->width,
+				texture->height, format, texel[0], texel[1], texel[2], texel[3], texel[4], texel[5], texel[6], texel[7]);
+	}
 	if (texture->target == GL_TEXTURE_CUBE_MAP)
 		z = (unsigned long)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
+	if (texture->tiled)
+	{
+		texture_upload_tiled(texture, level, z, width, height, depth, data, format);
+		return;
+	}
+	base = texture_level(texture, level, &pitch, &slice_bytes);
 	for (slice = 0; slice < (depth ? depth : 1); slice++)
 	{
 		unsigned char *destination = base + (z + slice) * slice_bytes + (y / block) * pitch + (x / block) * element_bytes;
@@ -1673,7 +1800,7 @@ static GX2BlendMode blend_factor(GLenum factor)
 	case GL_ONE_MINUS_SRC_COLOR: return GX2_BLEND_MODE_INV_SRC_COLOR;
 	case GL_SRC_ALPHA: return GX2_BLEND_MODE_SRC_ALPHA;
 	case GL_ONE_MINUS_SRC_ALPHA: return GX2_BLEND_MODE_INV_SRC_ALPHA;
-	case GL_DST_ALPHA: return GX2_BLEND_MODE_DST_ALPHA;
+	case GL_DST_ALPHA: return debug.dst_alpha_one ? GX2_BLEND_MODE_ONE : GX2_BLEND_MODE_DST_ALPHA;
 	case GL_ONE_MINUS_DST_ALPHA: return GX2_BLEND_MODE_INV_DST_ALPHA;
 	case GL_DST_COLOR: return GX2_BLEND_MODE_DST_COLOR;
 	case GL_ONE_MINUS_DST_COLOR: return GX2_BLEND_MODE_INV_DST_COLOR;
@@ -1821,7 +1948,7 @@ static void sampler_make(GX2Sampler *made, const struct sampler_parameters *samp
 		max_lod = sampler->max_lod;
 	if (sampler->min_lod > min_lod)
 		min_lod = sampler->min_lod;
-	if (!mipmapped)
+	if (!mipmapped || debug.no_mips)
 		max_lod = min_lod;
 	if (max_lod < 0.0f)
 		max_lod = 0.0f;
@@ -1909,6 +2036,11 @@ static int prepare_draw(void)
 	struct shader *vertex, *fragment;
 	int index;
 
+	for (index = 0; index < debug.skip_count; index++)
+	{
+		if (debug.skip_programs[index] == gl.program)
+			return 0;
+	}
 	if (!gl.ready || !wiiu_video_drawing() || !program || !program->linked)
 	{
 		draw_refused(!gl.ready ? "not ready" : !wiiu_video_drawing() ? "no foreground" : !program ? "no program" :
@@ -1952,6 +2084,12 @@ static int prepare_draw(void)
 		parameters = sampler ? &sampler->parameters : &texture->sampler;
 		sampler_make(&made, parameters, texture);
 		border = parameters->border;
+		if (draw_logged())
+			wiiu_log("gl:     %s (unit %d, slot %d): %lux%lux%lu format 0x%x, %d of %d levels, filters 0x%x 0x%x, wrap 0x%x 0x%x%s",
+				uniform->name, uniform->unit, uniform->sampler_location, texture->width, texture->height, texture->depth,
+				(unsigned int)texture->gx2.surface.format, texture->defined_levels, texture->levels, parameters->min_filter,
+				parameters->mag_filter, parameters->wrap_s, parameters->wrap_t, texture == gl.empty[uniform->sampler_slot] ?
+				" (nothing bound)" : "");
 		GX2SetPixelTexture(&texture->gx2, (uint32_t)uniform->sampler_location);
 		GX2SetPixelSampler(&made, (uint32_t)uniform->sampler_location);
 		if (parameters->wrap_s == GL_CLAMP_TO_BORDER || parameters->wrap_t == GL_CLAMP_TO_BORDER ||
@@ -1972,6 +2110,48 @@ static int prepare_draw(void)
 			gl.target_height, gl.target_has_color, gl.target_has_depth, gl.viewport[0], gl.viewport[1], gl.viewport[2],
 			gl.viewport[3], gl.depth_test, gl.depth_func, gl.depth_mask, gl.blend, gl.blend_source,
 			gl.blend_destination, gl.cull_face, gl.cull_mode, gl.front_face, gl.scissor_test);
+	if (draw_logged())
+	{
+		/* (each program's shaders once, beside the log: p<program>.vert and
+		.frag) */
+		static GLuint written[64];
+		static int written_count;
+		int seen = 0, which;
+
+		for (which = 0; which < written_count; which++)
+			seen |= written[which] == gl.program;
+		if (!seen && written_count < 64)
+		{
+			for (which = 0; which < 2; which++)
+			{
+				char path[128];
+				FILE *file;
+
+				snprintf(path, sizeof(path), WIIU_APP_FOLDER "/p%u.%s", gl.program, which ? "frag" : "vert");
+				file = fopen(path, "wb");
+				if (file)
+				{
+					fputs(which ? fragment->source : vertex->source, file);
+					fclose(file);
+				}
+			}
+			written[written_count++] = gl.program;
+		}
+		for (which = 0; which < program->uniform_count; which++)
+		{
+			const struct uniform *uniform = &program->uniforms[which];
+			const uint32_t *values = uniform->pixel_offset >= 0 ? program->pixel_values + uniform->pixel_offset :
+				uniform->vertex_offset >= 0 ? program->vertex_values + uniform->vertex_offset : NULL;
+			float vector[4];
+
+			if (uniform->sampler || !values)
+				continue;
+			memcpy(vector, values, sizeof(vector));
+			wiiu_log("gl:     uniform %s (%s %d, %d): %g %g %g %g", uniform->name, uniform->pixel_offset >= 0 ? "pixel" :
+				"vertex", uniform->pixel_offset >= 0 ? uniform->pixel_offset : uniform->vertex_offset, uniform->count,
+				vector[0], vector[1], vector[2], vector[3]);
+		}
+	}
 	draw_vertex = vertex;
 	return 1;
 }
@@ -2493,6 +2673,7 @@ static int gl_ready(void)
 	if (!wiiu_video_screen_color())
 		return 0;
 	state_defaults();
+	gl.start = OSGetSystemTime();
 	gl.ring = gpu_allocate(RING_SIZE, 0x100);
 	if (!gl.ring)
 	{
@@ -3841,7 +4022,22 @@ void wiiu_gl_frame_end(void)
 	gl.bound_depth = NULL;
 	gl.uploaded_program = 0;
 	gl.frame++;
-#ifdef HALO_CONSOLE_DEBUG_TOOLS
+	/* (log_at=N: the first frame after N seconds, once) */
+	if (debug.log_at && OSTicksToMilliseconds(OSGetSystemTime() - gl.start) / 1000 >= (OSTime)debug.log_at)
+	{
+		debug.log_at = 0;
+		debug.log_frame = 1;
+		debug.log_frame_number = gl.frame;
+		wiiu_log("gl: frame %lu logged (the last had %lu draws)", gl.frame, gl.frame_draws);
+	}
+	/* (log_big: the frame after the first of more than 300 draws, once) */
+	if (debug.log_big == 1 && gl.frame_draws > 300)
+	{
+		debug.log_big = 2;
+		debug.log_frame = 1;
+		debug.log_frame_number = gl.frame;
+	}
+#ifdef HALO_WIIU_GL_SWITCHES
 	if (gl.frame == 1 || gl.frame % 300 == 0)
 		wiiu_log("gl: frame %lu, %lu draws in the last", gl.frame, gl.frame_draws);
 #endif
