@@ -36,8 +36,9 @@ these controllers: fully pressed or not.
 enum { ANALOG_A, ANALOG_B, ANALOG_X, ANALOG_Y, ANALOG_BLACK, ANALOG_WHITE, ANALOG_LEFT_TRIGGER, ANALOG_RIGHT_TRIGGER };
 
 /* the buttons of each kind of controller, in the order: up, down, left,
-right, +, -, left stick, right stick, then A, B, X, Y (by place: bottom,
-right, left, top), black (R), white (L), left trigger (ZL), right (ZR) */
+right, +, -, left stick, right stick, then A, B, X, Y (by their labels, as
+the Wii U's own menus use them: A accepts, B backs out), black (R), white
+(L), left trigger (ZL), right (ZR) */
 struct layout
 {
 	unsigned int dpad[4], start, back, thumbs[2];
@@ -48,7 +49,7 @@ static const struct layout gamepad_layout =
 {
 	{ VPAD_BUTTON_UP, VPAD_BUTTON_DOWN, VPAD_BUTTON_LEFT, VPAD_BUTTON_RIGHT },
 	VPAD_BUTTON_PLUS, VPAD_BUTTON_MINUS, { VPAD_BUTTON_STICK_L, VPAD_BUTTON_STICK_R },
-	{ VPAD_BUTTON_B, VPAD_BUTTON_A, VPAD_BUTTON_Y, VPAD_BUTTON_X, VPAD_BUTTON_R, VPAD_BUTTON_L,
+	{ VPAD_BUTTON_A, VPAD_BUTTON_B, VPAD_BUTTON_X, VPAD_BUTTON_Y, VPAD_BUTTON_R, VPAD_BUTTON_L,
 	  VPAD_BUTTON_ZL, VPAD_BUTTON_ZR },
 };
 
@@ -56,7 +57,7 @@ static const struct layout pro_layout =
 {
 	{ WPAD_PRO_BUTTON_UP, WPAD_PRO_BUTTON_DOWN, WPAD_PRO_BUTTON_LEFT, WPAD_PRO_BUTTON_RIGHT },
 	WPAD_PRO_BUTTON_PLUS, WPAD_PRO_BUTTON_MINUS, { WPAD_PRO_BUTTON_STICK_L, WPAD_PRO_BUTTON_STICK_R },
-	{ WPAD_PRO_BUTTON_B, WPAD_PRO_BUTTON_A, WPAD_PRO_BUTTON_Y, WPAD_PRO_BUTTON_X, WPAD_PRO_TRIGGER_R,
+	{ WPAD_PRO_BUTTON_A, WPAD_PRO_BUTTON_B, WPAD_PRO_BUTTON_X, WPAD_PRO_BUTTON_Y, WPAD_PRO_TRIGGER_R,
 	  WPAD_PRO_TRIGGER_L, WPAD_PRO_TRIGGER_ZL, WPAD_PRO_TRIGGER_ZR },
 };
 
@@ -64,7 +65,7 @@ static const struct layout classic_layout =
 {
 	{ WPAD_CLASSIC_BUTTON_UP, WPAD_CLASSIC_BUTTON_DOWN, WPAD_CLASSIC_BUTTON_LEFT, WPAD_CLASSIC_BUTTON_RIGHT },
 	WPAD_CLASSIC_BUTTON_PLUS, WPAD_CLASSIC_BUTTON_MINUS, { 0, 0 },
-	{ WPAD_CLASSIC_BUTTON_B, WPAD_CLASSIC_BUTTON_A, WPAD_CLASSIC_BUTTON_Y, WPAD_CLASSIC_BUTTON_X,
+	{ WPAD_CLASSIC_BUTTON_A, WPAD_CLASSIC_BUTTON_B, WPAD_CLASSIC_BUTTON_X, WPAD_CLASSIC_BUTTON_Y,
 	  WPAD_CLASSIC_BUTTON_R, WPAD_CLASSIC_BUTTON_L, WPAD_CLASSIC_BUTTON_ZL, WPAD_CLASSIC_BUTTON_ZR },
 };
 
