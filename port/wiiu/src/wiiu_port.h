@@ -73,6 +73,14 @@ int wiiu_proc_update(void);
 void wiiu_proc_request_quit(void);
 void wiiu_proc_poll(void);
 
+/* the network (wiiu_net.c): up as Butter and Jelly brings it up, once;
+nonzero if it is */
+int wiiu_network_start(void);
+
+/* the start-up's network self-test and the console game list, on a thread
+of their own (wiiu_online.c, wiiu_game_list.h) */
+void wiiu_online_start(void);
+
 /* the controllers (wiiu_pad.c): the GamePad, then the Wii Remotes' Pro and
 Classic Controllers, in the game's four ports, as the Xbox's gamepad state
 (buttons as XINPUT_GAMEPAD's digital bits, analog buttons and sticks) */

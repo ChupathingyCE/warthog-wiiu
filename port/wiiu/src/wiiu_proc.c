@@ -142,6 +142,9 @@ static void proc_initialize(void)
 	proc_ready = 1;
 	atexit(proc_end);
 	wiiu_log("system: ProcUI ready");
+	/* (the network's self-test and the console game list, on a thread of
+	their own: wiiu_online.c) */
+	wiiu_online_start();
 }
 
 void wiiu_proc_request_quit(void)

@@ -20,6 +20,14 @@ python3 tools/wiiu_package.py --maps /path/to/maps --out ~/Downloads/Warthog-wii
 
 Cemu, then Aroma on a console (`sd:/wiiu/apps/halo/`).
 
+## Online
+
+At start-up a self-test logs `net test:` lines to `port.txt` (the byte
+order, the network, UDP, DNS, the console game list over plain HTTP); the
+list is the Multiplayer menu's ONLINE GAMES, which joins a game through
+internet play's tunnel, as on the original Xbox and the Xbox 360. The
+checklist: docs/hardware-test.md.
+
 ## Plan
 
 Big-endian, like the Xbox 360: the same byte-order and alignment work comes first. `--wuhb` bundles the stub only, never the maps.

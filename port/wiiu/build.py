@@ -402,6 +402,10 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
     # HALO_BIG_ENDIAN)
     for source in sorted((game / CONSOLE_GAME).glob("*.c")):
         add_object(source, f"{game_cflags} -I{_quote(game / CONSOLE_INCLUDE)}", [semantics_header])
+    # the port's own game units: the Multiplayer menu's ONLINE GAMES
+    # (HALO_CONSOLE_ONLINE_GAMES), in the game's terms
+    for source in sorted((port_dir / "game").glob("*.c")):
+        add_object(source, game_cflags, [semantics_header])
 
     platform_cflags = " ".join([
         abi,

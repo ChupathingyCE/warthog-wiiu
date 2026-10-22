@@ -346,3 +346,44 @@ and in what time, and the writes in place that waited.
 
 Cemu (interpreter) draws Blood Gulch as before with the same build. The
 console's checklist: docs/hardware-test.md.
+
+## Online: the game list and joining (2026-10-22)
+
+**Works, in Cemu (interpreter).** At start-up a thread (`src/wiiu_online.c`,
+the Xbox 360's `x360_online.c` on the Wii U's threads and clock) logs
+`net test:` lines to port.txt: the byte order's self-test, the network,
+a UDP datagram to the console's own port, `warthog.milenko.org` looked up,
+and `GET /v1/console/games` (plain HTTP/1.0) fetched and parsed. That list
+is the Multiplayer menu's ONLINE GAMES (`game/wiiu_browser_screen.c`,
+`HALO_CONSOLE_ONLINE_GAMES`): the original Xbox's screen, parser and words,
+as the 360 has them. In Cemu the list came (15 games, the Warthog servers
+among them), and A on `[C] Warthog 1` joined it through internet play's
+tunnel: the lobby, the settings record, Chill Out loaded, the player
+spawned and played.
+
+How it is put together:
+
+- The network comes up as Butter and Jelly brings it up on the Wii U
+  (`wiiu_network_start`, wiiu_net.c; its http_curl.cpp:306-338 and
+  platform_wiiu.cpp:184): wut's start-up has already started the socket
+  library and asked nn::ac to connect (ACConnectAsync, wut_socket_common's
+  __init_wut_socket); then ACInitialize, ACIsApplicationConnected, and only
+  if it is not connected, ACGetStartupId and ACConnectWithConfigId; the
+  address by its kind only. A failure is tried again after 10 s.
+- The cross-play byte order is the game's (ChupathingyCE/chupathingyce,
+  branch console-network-wire, on the Xbox 360's console-network): the
+  distributed netcode's messages, the game types' states, the game
+  settings record and the advertisement, little-endian on the wire as the
+  PCs and the original Xbox send them. Its self-test
+  (`network_wire_self_test`) compares 27 samples with the bytes the 32-bit
+  Linux build gives them, both ways: it passed in Cemu.
+- The list asks without `packs=1`: this base has no Xbox map packs yet.
+- The submodule is the game's `wiiu-network` branch: `wiiu-night` with the
+  shared byte-order commits picked onto it (this base is older than the
+  game's main; on it the settings record has no Bomb rules to turn).
+
+**Not yet.** Hardware. A game whose map the SD card has not is left right
+after joining (the map's check, as on the desktop). Hosting from the Wii U
+is untested.
+
+The console's checklist: docs/hardware-test.md, "Online".

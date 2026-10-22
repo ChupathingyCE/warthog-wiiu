@@ -10,6 +10,23 @@ The game's Winsock addresses (sockaddr_in as the Xbox laid it out: a 16-bit
 family, the port and the address in network order) have the layout of
 nsysnet's own, field for field, on this big-endian machine, so they are
 passed through as they are.
+
+The network comes up as the owner's Butter and Jelly brings it up on the
+Wii U (its src/platform/http_curl.cpp, Http::Init, lines 306 to 338; and
+src/platform/wiiu/platform_wiiu.cpp:184 for the address), once, before the
+first socket that goes anywhere (wiiu_network_start):
+
+- wut's start-up has already started the socket library (socket_lib_init)
+  and asked nn::ac to connect without waiting (ACConnectAsync: wut's
+  wut_socket_common.c, __init_wut_socket, linked with the first socket
+  call), as for Butter and Jelly.
+- ACInitialize (http_curl.cpp:309).
+- ACIsApplicationConnected; only if the console is not connected yet, its
+  start-up configuration (ACGetStartupId) connected with
+  ACConnectWithConfigId, which can block for seconds on a cold association
+  (http_curl.cpp:315-327; Aroma usually has the link up already).
+- ACGetAssignedAddress: the console's address, in this machine's order
+  (http_curl.cpp:330, platform_wiiu.cpp:184), logged by its kind only.
 */
 
 #include <errno.h>
@@ -30,6 +47,7 @@ passed through as they are.
 #include <sys/select.h>
 #include <sys/socket.h>
 
+#include <coreinit/mutex.h>
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <nn/ac.h>
@@ -406,15 +424,98 @@ int posix_socket_select(int *read, int *read_count, int *write, int *write_count
 	return result;
 }
 
-/* ---------- the console's address (nn::ac) */
+/* ---------- the network (nn::ac), and the console's address */
+
+/* (its kind, never the address: private, carrier-grade shared, other) */
+static const char *address_kind(uint32_t address)
+{
+	if ((address >> 24) == 10 || (address >> 20) == 0xAC1 || (address >> 16) == 0xC0A8)
+		return "private";
+	if ((address >> 22) == (0x64400000UL >> 22))
+		return "shared (carrier-grade NAT)";
+	if ((address >> 16) == 0xA9FE)
+		return "link-local";
+	return "public";
+}
+
+/* 0 not up, 1 up; the first caller brings it up, any other waits for it.
+A failure is tried again, no sooner than this after the last */
+#define NETWORK_RETRY_MS 10000
+static int network_state;
+static OSTime network_failed_at;
+static OSMutex network_mutex;
+static int network_mutex_ready;
+
+int wiiu_network_start(void)
+{
+	BOOL connected = FALSE;
+	ACConfigId configuration = 0;
+	uint32_t address = 0;
+	OSTime start;
+
+	if (__atomic_load_n(&network_state, __ATOMIC_ACQUIRE))
+		return network_state > 0;
+	/* (the mutex made once: the game's thread and the list's may both ask
+	at the start) */
+	if (!__atomic_exchange_n(&network_mutex_ready, 1, __ATOMIC_ACQ_REL))
+	{
+		OSInitMutex(&network_mutex);
+		__atomic_store_n(&network_mutex_ready, 2, __ATOMIC_RELEASE);
+	}
+	while (__atomic_load_n(&network_mutex_ready, __ATOMIC_ACQUIRE) != 2)
+		OSYieldThread();
+	OSLockMutex(&network_mutex);
+	if (network_state || (network_failed_at &&
+		OSTicksToMilliseconds(OSGetSystemTime() - network_failed_at) < NETWORK_RETRY_MS))
+	{
+		OSUnlockMutex(&network_mutex);
+		return network_state > 0;
+	}
+	start = OSGetSystemTime();
+	if (!NNResult_IsSuccess(ACInitialize()))
+	{
+		wiiu_log("network: ACInitialize failed");
+		network_failed_at = OSGetSystemTime();
+		OSUnlockMutex(&network_mutex);
+		return 0;
+	}
+	if (!NNResult_IsSuccess(ACIsApplicationConnected(&connected)) || !connected)
+	{
+		wiiu_log("network: not connected yet; connecting with the console's start-up configuration");
+		if (!NNResult_IsSuccess(ACGetStartupId(&configuration)))
+		{
+			wiiu_log("network: no network configuration on this console (System Settings, Internet)");
+			network_failed_at = OSGetSystemTime();
+			OSUnlockMutex(&network_mutex);
+			return 0;
+		}
+		if (!NNResult_IsSuccess(ACConnectWithConfigId(configuration)))
+		{
+			wiiu_log("network: could not connect with configuration %u (%lld ms)", (unsigned)configuration,
+				(long long)OSTicksToMilliseconds(OSGetSystemTime() - start));
+			network_failed_at = OSGetSystemTime();
+			OSUnlockMutex(&network_mutex);
+			return 0;
+		}
+	}
+	if (NNResult_IsSuccess(ACGetAssignedAddress(&address)) && address)
+	{
+		wiiu_log("network: up%s, a %s address (%lld ms)", connected ? " (already connected)" : "",
+			address_kind(address), (long long)OSTicksToMilliseconds(OSGetSystemTime() - start));
+	}
+	else
+	{
+		wiiu_log("network: connected, but no address yet (%lld ms)",
+			(long long)OSTicksToMilliseconds(OSGetSystemTime() - start));
+	}
+	__atomic_store_n(&network_state, 1, __ATOMIC_RELEASE);
+	OSUnlockMutex(&network_mutex);
+	return 1;
+}
 
 static int network_ready(void)
 {
-	static int initialized;
-
-	if (!initialized)
-		initialized = NNResult_IsSuccess(ACInitialize()) ? 1 : -1;
-	return initialized > 0;
+	return wiiu_network_start();
 }
 
 /* the console's address, in network order; 0 if it has none. wut has no
@@ -585,6 +686,8 @@ posix_ulong posix_resolve_ipv4(const char *host)
 	struct addrinfo hints, *results;
 	posix_ulong address = 0;
 
+	if (!network_ready())
+		return 0;
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = AF_INET;
 	hints.ai_socktype = SOCK_DGRAM;
