@@ -5,6 +5,7 @@ What the platform layer asks of POSIX that newlib and wut do not have.
 */
 
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -37,6 +38,24 @@ int clock_nanosleep(clockid_t clock, int flags, const struct timespec *request, 
 	if (nanoseconds > 0)
 		OSSleepTicks(OSNanosecondsToTicks(nanoseconds));
 	return 0;
+}
+
+/* ---------- what the shared code asks of a console that must be served
+(halo_console_features.h, HALO_CONSOLE_WAIT_POLL): the waits of the thread
+that runs the game serve the system, so HOME works while they last */
+
+void console_wait_poll(void)
+{
+	wiiu_proc_poll();
+}
+
+void console_trace(const char *format, ...)
+{
+	va_list arguments;
+
+	va_start(arguments, format);
+	wiiu_log_v(format, arguments);
+	va_end(arguments);
 }
 
 /* ---------- a code address's symbol (dlfcn.h), from the loader's table */
@@ -453,6 +472,65 @@ static void seek_pending_clear(int descriptor)
 		seek_pending[descriptor] = 0;
 }
 
+/* ---------- a lazily lengthened file's length, kept past the game's end: a
+sidecar file beside it (cache000.map.len) holds the length the game gave it,
+and fstat reports that where the file is shorter. The SD card's file system
+takes no seek past a file's end, so a single write at the length's end is
+no way to make it (the file would have to be written out to reach it) */
+
+#define LENGTH_PATH_SIZE 260
+
+static char descriptor_path[SEEK_PENDING_FILES][LENGTH_PATH_SIZE];
+
+static int length_path_is_cache(const char *path)
+{
+	return strstr(path, "/z/cache") != NULL && !strstr(path, ".len");
+}
+
+static void length_sidecar_path(const char *path, char *sidecar)
+{
+	snprintf(sidecar, LENGTH_PATH_SIZE, "%.250s.len", path);
+}
+
+static void length_remember(int descriptor, off_t length)
+{
+	char sidecar[LENGTH_PATH_SIZE];
+	FILE *file;
+
+	if (descriptor < 0 || descriptor >= SEEK_PENDING_FILES || !descriptor_path[descriptor][0] ||
+		!length_path_is_cache(descriptor_path[descriptor]))
+		return;
+	length_sidecar_path(descriptor_path[descriptor], sidecar);
+	file = fopen(sidecar, "w");
+	if (!file)
+	{
+		wiiu_log("files: %s not written (%d)", sidecar, errno);
+		return;
+	}
+	fprintf(file, "%lld\n", (long long)length);
+	fclose(file);
+	wiiu_log("files: length %lld remembered in %s", (long long)length, sidecar);
+}
+
+static off_t length_remembered(int descriptor)
+{
+	char sidecar[LENGTH_PATH_SIZE];
+	long long length = 0;
+	FILE *file;
+
+	if (descriptor < 0 || descriptor >= SEEK_PENDING_FILES || !descriptor_path[descriptor][0] ||
+		!length_path_is_cache(descriptor_path[descriptor]))
+		return 0;
+	length_sidecar_path(descriptor_path[descriptor], sidecar);
+	file = fopen(sidecar, "r");
+	if (!file)
+		return 0;
+	if (fscanf(file, "%lld", &length) != 1)
+		length = 0;
+	fclose(file);
+	return (off_t)length;
+}
+
 /* ---------- a file's length (posix_files.c's SetEndOfFile): a file made
 longer by writing zeros at its end, which every file system takes (Cemu's
 SD card makes a file only shorter); made shorter as the C library does */
@@ -477,12 +555,40 @@ static int device_truncate(int descriptor, off_t length)
 	return devoptab_list[handle->device]->ftruncate_r(_REENT, handle->fileStruct, length);
 }
 
+/* (the file's device's own, as the C library's fstat calls it) */
+static int device_fstat(int descriptor, struct stat *status)
+{
+	__handle *handle = __get_handle(descriptor);
+
+	if (!handle || !devoptab_list[handle->device]->fstat_r)
+	{
+		errno = EBADF;
+		return -1;
+	}
+	_REENT->deviceData = devoptab_list[handle->device]->deviceData;
+	return devoptab_list[handle->device]->fstat_r(_REENT, handle->fileStruct, status);
+}
+
+/* (a lazily lengthened file's remembered length where it is longer than the
+file) */
+int fstat(int descriptor, struct stat *status)
+{
+	off_t remembered;
+
+	if (device_fstat(descriptor, status) != 0)
+		return -1;
+	remembered = length_remembered(descriptor);
+	if (remembered > status->st_size)
+		status->st_size = remembered;
+	return 0;
+}
+
 int ftruncate(int descriptor, off_t length)
 {
 	struct stat status;
 	off_t position;
 
-	if (fstat(descriptor, &status) != 0)
+	if (device_fstat(descriptor, &status) != 0)
 		return -1;
 	if (length == status.st_size)
 		return 0;
@@ -496,6 +602,7 @@ int ftruncate(int descriptor, off_t length)
 	{
 		seek_pending_clear(descriptor);
 		wiiu_log("files: length %lld not written out (grows as written)", (long long)length);
+		length_remember(descriptor, length);
 		return 0;
 	}
 	position = lseek(descriptor, 0, SEEK_CUR);
@@ -652,12 +759,26 @@ int open(const char *path, int flags, ...)
 		mode = 0644;
 	}
 	{
+		struct stat before;
+		int existed = stat(path, &before) == 0 && !(flags & O_TRUNC);
 		int descriptor = _open_r(_REENT, path, flags, mode);
 
 		if (flags & (O_CREAT | O_TRUNC))
 			wiiu_log("files: made %s (%d)", path, descriptor);
 
 		seek_pending_clear(descriptor);
+		if (descriptor >= 0 && descriptor < SEEK_PENDING_FILES)
+		{
+			snprintf(descriptor_path[descriptor], LENGTH_PATH_SIZE, "%s", path);
+			/* (a file made new is no longer the length it had) */
+			if (length_path_is_cache(path) && (flags & (O_CREAT | O_TRUNC)) && !existed)
+			{
+				char sidecar[LENGTH_PATH_SIZE];
+
+				length_sidecar_path(path, sidecar);
+				unlink(sidecar);
+			}
+		}
 		return descriptor;
 	}
 }
