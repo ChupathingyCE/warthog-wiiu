@@ -132,7 +132,7 @@ never reads the file, so every switch stays off. */
 static struct
 {
 	int loaded;
-	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one;
+	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned;
 	unsigned long log_at;
 	GLuint skip_programs[8];
 	int skip_count;
@@ -167,6 +167,9 @@ static void debug_load(void)
 		if (!strcmp(word, "no_mips")) debug.no_mips = 1;
 		if (!strcmp(word, "log_big")) debug.log_big = 1;
 		if (!strcmp(word, "dst_alpha_one")) debug.dst_alpha_one = 1;
+		if (!strcmp(word, "lequal")) debug.equal_as_lequal = 1;
+		if (!strcmp(word, "skip_fog")) debug.skip_fog = 1;
+		if (!strcmp(word, "packed_unsigned")) debug.packed_unsigned = 1;
 		sscanf(word, "log_at=%lu", &debug.log_at);
 		if (debug.skip_count < 8 && sscanf(word, "skip_program=%u", &debug.skip_programs[debug.skip_count]) == 1)
 			debug.skip_count++;
@@ -960,6 +963,25 @@ static void texture_upload(struct texture *texture, GLenum target, int level, un
 
 	if (!texture->memory || !data || level >= texture->levels)
 		return;
+	if (debug.log_textures && level == 0 && !texture->compressed && element_bytes == 4 && width * height >= 4096)
+	{
+		/* (the texels' average color and alpha: textures that come out
+		dark or clear) */
+		static int logged;
+		const unsigned char *texel = data;
+		unsigned long index, count = width * height * (depth ? depth : 1), sum[4] = { 0, 0, 0, 0 };
+
+		for (index = 0; index < count; index++)
+		{
+			sum[0] += texel[index * 4 + 0];
+			sum[1] += texel[index * 4 + 1];
+			sum[2] += texel[index * 4 + 2];
+			sum[3] += texel[index * 4 + 3];
+		}
+		if (logged++ < 80)
+			wiiu_log("gl: texture %lux%lu (0x%x data) averages %lu %lu %lu %lu", width, height, format, sum[0] / count,
+				sum[1] / count, sum[2] / count, sum[3] / count);
+	}
 	if (debug.log_textures && level == 0 && texture->width <= 16 && texture->height <= 16 && !texture->compressed)
 	{
 		static int logged;
@@ -1268,7 +1290,7 @@ vertex shader's depth made OpenGL's as it ends (the file's comment) */
 static char *shader_text(const char *source, int vertex)
 {
 	size_t size = strlen(source);
-	char *text = malloc(size * 2 + 1024);
+	char *text = malloc(size * 2 + 2048);
 	const char *line = source;
 	char *out = text;
 
@@ -1323,6 +1345,43 @@ static char *shader_text(const char *source, int vertex)
 		line += length;
 	}
 	*out = '\0';
+	debug_load();
+	if (vertex && !debug.packed_unsigned)
+	{
+		/* (the packed normals' fields taken with unsigned shifts and masks,
+		their signs by comparison, not by shifting a signed integer right:
+		with the arithmetic shifts nv2a_vsh.c writes, Blood Gulch's
+		bump-mapped lighting came out dark and faceted in Cemu, which of
+		CafeGLSL's code or Cemu's reading of it is to blame not yet known;
+		the same numbers either way. The bring-up switch packed_unsigned
+		leaves the shifts as they are, to compare on the console) */
+		static const char *const signed_lines[3] =
+		{
+			"int x = int(p << 21) >> 21;",
+			"int y = int(p << 10) >> 21;",
+			"int z = int(p) >> 22;",
+		};
+		static const char *const unsigned_lines[3] =
+		{
+			"int x = int(p & 0x7FFu) - ((p & 0x400u) != 0u ? 2048 : 0);",
+			"int y = int((p >> 11u) & 0x7FFu) - (((p >> 11u) & 0x400u) != 0u ? 2048 : 0);",
+			"int z = int(p >> 22u) - ((p & 0x80000000u) != 0u ? 1024 : 0);",
+		};
+		int line_index;
+
+		for (line_index = 0; line_index < 3; line_index++)
+		{
+			char *at = strstr(text, signed_lines[line_index]);
+
+			if (at)
+			{
+				size_t old_length = strlen(signed_lines[line_index]), new_length = strlen(unsigned_lines[line_index]);
+
+				memmove(at + new_length, at + old_length, strlen(at + old_length) + 1);
+				memcpy(at, unsigned_lines[line_index], new_length);
+			}
+		}
+	}
 	if (vertex)
 	{
 		/* (main renamed, and called by a main that ends with the depth) */
@@ -1890,7 +1949,8 @@ static void apply_render_state(void)
 		blend_factor(gl.blend_destination_alpha), blend_operation(gl.blend_equation_alpha));
 	GX2SetBlendConstantColor(gl.blend_color[0], gl.blend_color[1], gl.blend_color[2], gl.blend_color[3]);
 	GX2SetTargetChannelMasks((GX2ChannelMask)mask, 0, 0, 0, 0, 0, 0, 0);
-	GX2SetDepthStencilControl(depth, depth && gl.depth_mask, compare_function(gl.depth_func), stencil, FALSE,
+	GX2SetDepthStencilControl(depth, depth && gl.depth_mask,
+		compare_function(debug.equal_as_lequal && gl.depth_func == GL_EQUAL ? GL_LEQUAL : gl.depth_func), stencil, FALSE,
 		stencil_function, stencil_operation(gl.stencil_zpass), stencil_operation(gl.stencil_zfail),
 		stencil_operation(gl.stencil_fail), stencil_function, stencil_operation(gl.stencil_zpass),
 		stencil_operation(gl.stencil_zfail), stencil_operation(gl.stencil_fail));
@@ -2054,6 +2114,13 @@ static int prepare_draw(void)
 		draw_refused("a shader is missing");
 		return 0;
 	}
+	/* (skip_fog: the passes drawn over the depth already there with one
+	input, the atmosphere's) */
+	if (debug.skip_fog && vertex->inputs == 1 && gl.depth_func == GL_EQUAL && gl.blend &&
+		gl.blend_source == GL_ONE && gl.blend_destination == GL_ONE_MINUS_SRC_ALPHA)
+	{
+		return 0;
+	}
 	bind_targets();
 	if (!gl.target_has_color && !gl.target_has_depth)
 	{
@@ -2146,6 +2213,17 @@ static int prepare_draw(void)
 
 			if (uniform->sampler || !values)
 				continue;
+			if (!strcmp(uniform->name, "c"))
+			{
+				int element;
+
+				for (element = 0; element < uniform->count && element < 64; element++)
+				{
+					memcpy(vector, values + element * 4, sizeof(vector));
+					wiiu_log("gl:     c[%d] = %g %g %g %g", element, vector[0], vector[1], vector[2], vector[3]);
+				}
+				continue;
+			}
 			memcpy(vector, values, sizeof(vector));
 			wiiu_log("gl:     uniform %s (%s %d, %d): %g %g %g %g", uniform->name, uniform->pixel_offset >= 0 ? "pixel" :
 				"vertex", uniform->pixel_offset >= 0 ? uniform->pixel_offset : uniform->vertex_offset, uniform->count,
