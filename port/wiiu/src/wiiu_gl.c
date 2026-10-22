@@ -132,7 +132,7 @@ never reads the file, so every switch stays off. */
 static struct
 {
 	int loaded;
-	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace;
+	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips;
 	unsigned long log_frame_number;
 } debug;
 
@@ -160,6 +160,7 @@ static void debug_load(void)
 		if (!strcmp(word, "clear_red")) debug.clear_red = 1;
 		if (!strcmp(word, "blit_green")) debug.blit_green = 1;
 		if (!strcmp(word, "trace")) debug.trace = 1;
+		if (!strcmp(word, "native_strips")) debug.native_strips = 1;
 		if (!strcmp(word, "screen_magenta")) debug.screen_magenta = 1;
 		if (sscanf(word, "log_frame=%lu", &debug.log_frame_number) == 1)
 			debug.log_frame = 1;
@@ -1768,8 +1769,10 @@ static void apply_render_state(void)
 		stencil_operation(gl.stencil_zfail), stencil_operation(gl.stencil_fail));
 	GX2SetStencilMask((uint8_t)gl.stencil_mask, (uint8_t)gl.stencil_write_mask, (uint8_t)gl.stencil_reference,
 		(uint8_t)gl.stencil_mask, (uint8_t)gl.stencil_write_mask, (uint8_t)gl.stencil_reference);
-	/* (the winding GL culls, from the face it calls front; GX2 is told
-	the other one is the front, and culls the back) */
+	/* (the winding GL culls, from the face it calls front, in window
+	coordinates whose rows run down, glClipControl's GL_UPPER_LEFT, as
+	Direct3D's and GX2's do: GX2 is told the other one is the front, and
+	culls the back. Strips and fans are drawn as lists: draw) */
 	if (gl.cull_face && gl.cull_mode != GL_FRONT_AND_BACK && !debug.no_cull)
 	{
 		GLenum culled = gl.cull_mode == GL_FRONT ? gl.front_face : gl.front_face == GL_CCW ? GL_CW : GL_CCW;
@@ -2020,8 +2023,11 @@ static int attribute_format(const struct attribute *attribute, GX2AttribFormat *
 	}
 	case GL_UNSIGNED_SHORT:
 	case GL_SHORT:
-		*format = (GX2AttribFormat)((size == 1 ? GX2_ATTRIB_TYPE_16 : size == 2 ? GX2_ATTRIB_TYPE_16_16 :
-			GX2_ATTRIB_TYPE_16_16_16_16) | flags | (attribute->type == GL_SHORT ? GX2_ATTRIB_FLAG_SIGNED : 0));
+		/* (one short is fetched as two, the second masked off: Cemu decodes
+		no single 16-bit attribute, _emitAttributeDecodeGLSL's "unsupported
+		fmt 05"; the word is the vertex's or a copy's, padded) */
+		*format = (GX2AttribFormat)((size <= 2 ? GX2_ATTRIB_TYPE_16_16 : GX2_ATTRIB_TYPE_16_16_16_16) | flags |
+			(attribute->type == GL_SHORT ? GX2_ATTRIB_FLAG_SIGNED : 0));
 		*bytes = 2 * (unsigned long)size;
 		return 1;
 	case GL_UNSIGNED_BYTE:
@@ -2224,10 +2230,78 @@ static int draw_copies_attributes(void)
 	return 0;
 }
 
+/* A strip's or a fan's triangles as a list's indices, in the ring (16-bit
+words while the vertices fit), in GL's order: in Cemu, the strips' triangles
+came out wound the other way from a list's and a fan's (the main menu's
+ring, drawn in strips, was culled where its text, drawn in fans, was not,
+whichever winding GX2 was told was the front; as lists, both are drawn). A
+list's winding is the same everywhere. The bring-up switch native_strips
+draws strips as they are, to compare on the console. */
+static const void *fan_as_list(unsigned long first, unsigned long count, const unsigned char *indices,
+	unsigned long index_bytes, unsigned long *list_count, unsigned long *list_bytes, int strip)
+{
+	unsigned long triangles = count - 2, triangle, highest = first + count;
+	unsigned long out_bytes;
+	unsigned char *list;
+
+	if (indices)
+	{
+		unsigned long index;
+
+		highest = 0;
+		for (index = 0; index < count; index++)
+		{
+			unsigned long value = index_bytes == 4 ? ((const uint32_t *)indices)[index] : ((const uint16_t *)indices)[index];
+
+			if (value + 1 > highest)
+				highest = value + 1;
+		}
+	}
+	out_bytes = highest > 0xffff ? 4 : 2;
+	list = ring_reserve(triangles * 3 * out_bytes);
+	if (!list)
+		return NULL;
+	for (triangle = 0; triangle < triangles; triangle++)
+	{
+		unsigned long corners[3], corner;
+
+		if (strip)
+		{
+			/* (GL's strip: every other triangle's first two corners
+			exchanged) */
+			corners[0] = triangle + (triangle & 1);
+			corners[1] = triangle + 1 - (triangle & 1);
+			corners[2] = triangle + 2;
+		}
+		else
+		{
+			corners[0] = 0;
+			corners[1] = triangle + 1;
+			corners[2] = triangle + 2;
+		}
+		for (corner = 0; corner < 3; corner++)
+		{
+			unsigned long value = indices ? (index_bytes == 4 ? ((const uint32_t *)indices)[corners[corner]] :
+				((const uint16_t *)indices)[corners[corner]]) : first + corners[corner];
+
+			if (out_bytes == 4)
+				((uint32_t *)list)[triangle * 3 + corner] = (uint32_t)value;
+			else
+				((uint16_t *)list)[triangle * 3 + corner] = (uint16_t)value;
+		}
+	}
+	gpu_written(list, triangles * 3 * out_bytes, GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER);
+	*list_count = triangles * 3;
+	*list_bytes = out_bytes;
+	return list;
+}
+
 static void draw(GLenum mode, unsigned long first, unsigned long count, GLenum index_type, const void *indices,
 	long base_vertex)
 {
 	GX2PrimitiveMode primitive;
+	const unsigned char *source = NULL;
+	unsigned long index_bytes = index_type == GL_UNSIGNED_INT ? 4 : 2;
 
 	debug_load();
 	if (debug.no_draws || !count || !prepare_draw())
@@ -2238,9 +2312,7 @@ static void draw(GLenum mode, unsigned long first, unsigned long count, GLenum i
 	if (index_type)
 	{
 		struct buffer *buffer = object_get(gl.element_buffer, _object_buffer);
-		unsigned long index_bytes = index_type == GL_UNSIGNED_INT ? 4 : 2;
 		unsigned long offset = (unsigned long)(uintptr_t)indices;
-		const unsigned char *source;
 
 		if (!buffer || !buffer->data || offset + count * index_bytes > buffer->size)
 			return;
@@ -2259,23 +2331,53 @@ static void draw(GLenum mode, unsigned long first, unsigned long count, GLenum i
 					draw_vertex_end = value + 1;
 			}
 		}
-		if (!setup_vertices(base_vertex))
+	}
+	else
+	{
+		draw_vertex_end = first + count;
+		base_vertex = 0;
+	}
+	if (!setup_vertices(base_vertex))
+		return;
+	if (primitive == GX2_PRIMITIVE_MODE_TRIANGLE_FAN ||
+		(!debug.native_strips && primitive == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP))
+	{
+		unsigned long list_count, list_bytes;
+		const void *list;
+
+		if (count < 3)
 			return;
-		if (draw_logged())
-			wiiu_log("gl: draw %lu: indexed %lu, base %ld, mode 0x%x", gl.draws, count, base_vertex, mode);
+		list = fan_as_list(first, count, source, index_bytes, &list_count, &list_bytes,
+			primitive == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP);
+		if (!list)
+			return;
+		source = list;
+		count = list_count;
+		index_bytes = list_bytes;
+		primitive = GX2_PRIMITIVE_MODE_TRIANGLES;
+	}
+	if (draw_logged())
+	{
+		wiiu_log("gl: draw %lu: %s %lu from %lu, base %ld, mode 0x%x", gl.draws, source ? "indexed" : "arrays", count,
+			first, base_vertex, mode);
+		if (source && index_bytes == 2 && count >= 8)
+		{
+			struct buffer *buffer = object_get(gl.element_buffer, _object_buffer);
+
+			wiiu_log("gl:     indices%s: %u %u %u %u %u %u %u %u", buffer && buffer->alias ? " (window)" : "",
+				((const uint16_t *)source)[0], ((const uint16_t *)source)[1], ((const uint16_t *)source)[2],
+				((const uint16_t *)source)[3], ((const uint16_t *)source)[4], ((const uint16_t *)source)[5],
+				((const uint16_t *)source)[6], ((const uint16_t *)source)[7]);
+		}
+	}
+	if (source)
+	{
 		/* (the indices are the CPU's words, where they are) */
 		GX2DrawIndexedEx(primitive, (uint32_t)count, index_bytes == 4 ? GX2_INDEX_TYPE_U32 : GX2_INDEX_TYPE_U16, source,
 			0, 1);
 	}
 	else
-	{
-		draw_vertex_end = first + count;
-		if (!setup_vertices(0))
-			return;
-		if (draw_logged())
-			wiiu_log("gl: draw %lu: %lu from %lu, mode 0x%x", gl.draws, count, first, mode);
 		GX2DrawEx(primitive, (uint32_t)count, (uint32_t)first, 1);
-	}
 	gl.draws++;
 	gl.frame_draws++;
 	targets_written();
