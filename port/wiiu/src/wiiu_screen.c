@@ -123,28 +123,24 @@ void wiiu_screen_stop(void)
 	screen_state = -1;
 }
 
-/* The foreground given up (the HOME button menu): the screens and their
-buffers are let go, as WHBLogConsole lets go of its own, and made again on
-return. */
+/* The foreground given up (the HOME button menu): nothing is drawn until it
+comes back. WHBLogConsole does the same and frees only its buffers, which
+it keeps in MEM1 (the system takes MEM1 back); ours are in MEM2 and stay,
+and OSScreen is never shut down, as it is not there. */
 void wiiu_screen_release(void)
 {
-	if (screen_state != 1)
-	{
-		screen_released = 1;
-		return;
-	}
-	wiiu_log("screen: OSScreen shut down");
-	OSScreenShutdown();
-	MEMFreeToDefaultHeap(buffers[0]);
-	MEMFreeToDefaultHeap(buffers[1]);
-	buffers[0] = buffers[1] = NULL;
-	screen_state = 0;
 	screen_released = 1;
 }
 
+/* (the foreground back: the buffers given to OSScreen again, as
+WHBLogConsole gives them, and the lines drawn at the next frame) */
 void wiiu_screen_acquire(void)
 {
+	if (screen_state == 1)
+	{
+		OSScreenSetBufferEx(SCREEN_TV, buffers[0]);
+		OSScreenSetBufferEx(SCREEN_DRC, buffers[1]);
+	}
 	screen_released = 0;
 	lines_changed = 1;
-	wiiu_log("screen: ready to start again");
 }

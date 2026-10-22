@@ -64,7 +64,7 @@ static uint32_t proc_release(void *context)
 	wiiu_log("system: release 2/3, the log held in memory");
 	wiiu_log_hold(1);
 	wiiu_screen_release();
-	wiiu_log("system: release 3/3, the screens let go");
+	wiiu_log("system: release 3/3, drawing paused");
 	return 0;
 }
 
@@ -74,7 +74,7 @@ static uint32_t proc_acquire(void *context)
 	wiiu_log_hold(0);
 	wiiu_log("system: acquire 1/2, the foreground is back");
 	wiiu_screen_acquire();
-	wiiu_log("system: acquire 2/2, the screens come back at the next frame");
+	wiiu_log("system: acquire 2/2, the screens drawn at the next frame");
 	return 0;
 }
 
