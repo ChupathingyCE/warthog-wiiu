@@ -166,14 +166,34 @@ ssize_t pwrite(int descriptor, const void *buffer, size_t count, off_t offset)
 	off_t previous;
 	ssize_t result = -1;
 
+	/* (the first positioned writes traced step by step: the first cache
+	file's header write never returned on the console) */
+	static int traced;
+	int trace = traced < 4;
+
+	if (trace)
+	{
+		traced++;
+		wiiu_log("files: pwrite %d: %u bytes at %lld, buffer %p", descriptor, (unsigned)count, (long long)offset, buffer);
+	}
 	positional_lock();
+	if (trace)
+		wiiu_log("files: pwrite %d: locked", descriptor);
 	previous = lseek(descriptor, 0, SEEK_CUR);
+	if (trace)
+		wiiu_log("files: pwrite %d: position %lld", descriptor, (long long)previous);
 	if (previous != (off_t)-1 && lseek_padded(descriptor, offset, SEEK_SET) != (off_t)-1)
 	{
+		if (trace)
+			wiiu_log("files: pwrite %d: placed, writing", descriptor);
 		result = write(descriptor, buffer, count);
+		if (trace)
+			wiiu_log("files: pwrite %d: wrote %d (errno %d)", descriptor, (int)result, errno);
 		lseek(descriptor, previous, SEEK_SET);
 	}
 	OSUnlockMutex(&positional_mutex);
+	if (trace)
+		wiiu_log("files: pwrite %d: done", descriptor);
 	/* (the first writes that take nothing, logged: the SD card's device
 	refusing a file's writes shows here) */
 	if (result <= 0 && count)
