@@ -59,7 +59,8 @@ void wiiu_video_swap(void);
 void wiiu_video_idle(void);
 void wiiu_video_shutdown(void);
 
-/* the end, noted step by step to FSA directly (wiiu_exit.c) */
+/* the end, noted step by step: the port's log, then FSA directly once wut's
+devoptab is down (wiiu_exit.c) */
 void wiiu_exit_begin(void);
 void wiiu_exit_phase(const char *text);
 void wiiu_exit_threads(const char *when);

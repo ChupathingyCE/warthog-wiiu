@@ -17,7 +17,12 @@ never by itself).
 #include <proc_ui/procui.h>
 #include <sysapp/launch.h>
 
+#include "thread_stop.h"
 #include "wiiu_port.h"
+
+/* the longest the end waits for the platform layer's threads, together
+(each wakes in 50 ms at most: thread_stop.h's callers) */
+#define PROC_THREADS_WAIT 1000
 
 static int proc_ready;
 static int quit_requested;
@@ -29,16 +34,23 @@ static ProcUIStatus proc_status;
 
 /* The game's end, however it comes (its Quit, a failed assertion's halt):
 an application ends when ProcUI says so, never by itself, or the console
-waits on it forever. The order is SDL's Wii U port: the audio stopped
-first (SDL_AudioQuit), then the video's quit (WIIU_VideoQuit): the Wii U
-Menu asked for if the system has not asked yet and the messages taken until
-ProcUI says to exit, the screens let go, ProcUIShutdown last. Every step is
-logged and flushed before the next, for the one that does not return. */
+waits on it forever. First the platform layer's threads are stopped and
+waited for, as Butter and Jelly stops its workers before SDL_Quit
+(docs/exit.md), while the files and the sockets still work. Then the order
+is SDL's Wii U port: the audio stopped (SDL_AudioQuit), then the video's
+quit (WIIU_VideoQuit): the Wii U Menu asked for if the system has not asked
+yet and the messages taken until ProcUI says to exit, the screens let go,
+ProcUIShutdown last. Every step is logged and flushed before the next, for
+the one that does not return. */
 static void proc_end(void)
 {
 	wiiu_exit_begin();
 	wiiu_exit_phase("proc_end: begun");
 	wiiu_log("system: the game ended");
+	wiiu_log_flush();
+	wiiu_exit_phase("proc_end: the platform layer's threads to stop");
+	thread_stop_all(PROC_THREADS_WAIT);
+	wiiu_exit_threads("threads once they were asked to stop:");
 	wiiu_log_flush();
 	wiiu_audio_shutdown();
 	wiiu_log_flush();
