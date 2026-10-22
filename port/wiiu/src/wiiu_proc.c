@@ -62,6 +62,9 @@ static void proc_initialize(void)
 	OSEnableHomeButtonMenu(TRUE);
 	/* (AX started, which silences the Wii U Menu's music) */
 	wiiu_audio_startup();
+	/* (the first poll a frame's time from now: never inside the
+	constructors, where ProcUI's messages hung the start on the console) */
+	proc_last_service = OSGetSystemTime();
 	proc_ready = 1;
 	atexit(proc_end);
 	wiiu_log("system: ProcUI ready");
@@ -123,8 +126,9 @@ int wiiu_proc_update(void)
 
 /* The loading of the maps goes seconds without a frame, and ProcUI
 (taken once a frame above) would hear nothing from the HOME button in that
-time. The places a long stretch passes through often (the log, the files'
-reads, the frame pacing) call this: it takes the messages, no more often than
+time. The places a long stretch passes through often (the files' reads,
+the frame pacing) call this, but not the log, which the constructors use
+before the game starts: it takes the messages, no more often than
 every 16 ms, and only on the thread that started ProcUI (ProcUIProcessMessages
 is that thread's; ProcUISubProcessMessages is for threads of another core,
 and a callback would run on a thread that cannot release the foreground for
