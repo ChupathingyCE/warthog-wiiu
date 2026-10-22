@@ -206,9 +206,10 @@ which is where HOME and Close ended it. No frame line came (one every 300
 frames), so frames took seconds each.
 
 What fits all of it: a GPU that stopped. GX2's waits for the GPU give up
-after GX2's GPU timeout, 10 s from GX2Init, and return FALSE (decaf-emu's
-gx2_state.cpp and gx2_cbpool.cpp); the frame's end waits for the frame
-before last, so each frame takes that long and no flip comes. Not certain
+after GX2's GPU timeout and return FALSE (decaf-emu's gx2_state.cpp and
+gx2_cbpool.cpp; decaf says 10 s, the console logged 1000 ms); the frame's
+end waits for the frame before last, so each frame takes that long and no
+flip comes. Not certain
 yet, so the next run logs it:
 
 - every GPU wait timed, and any that gives up logged with the timestamps
@@ -236,3 +237,31 @@ no end; it now gives up after 100 ms, counting no samples.
 frames (30 s) is real time. The mixer's streams are refilled by the game's
 thread (`DirectSoundDoWork`, every frame: dsound_sdl.c), so a frame of
 seconds starves them. It should follow the frame rate.
+
+**Second run: the step named.** Frames 1 to 18 (no draws) were presented.
+Frame 19's first draw stopped the GPU for good: "the GPU stopped at frame
+19's first indexed draw of a program" (program 4117, a strip of 1227
+indices drawn as a list into framebuffer 4126, 1280x720, depth test off,
+additive blend), with nothing checked before it in that frame (its clears
+were not checked). The run had no gl.txt, so all four of Cemu's
+workarounds were on. Every frame after took about 1.15 s (the GPU and flip
+waits giving up).
+
+Not yet known which part of that draw: its clears, the vertices read in
+place from the Xbox window, its textures (linear, DXT) or its targets (a
+linear color texture with a tiled depth buffer in MEM2). The next run:
+
+- vertex buffers are given to GX2 on GX2_VERTEX_BUFFER_ALIGNMENT (0x40,
+  wut's gx2/enum.h; GX2R's buffers are), the window's vertices read from
+  the 0x40 below their start with each attribute's offset moved on by as
+  much (`unaligned_vertices` gives GX2 the start as before);
+- each framebuffer's first clear is checked, and logged with its buffers'
+  addresses and tile modes, so a clear that stops the GPU is named;
+- the first draws, and each program's first draw until the GPU stops, log
+  everything GX2 is given: the primitive, index type, index address
+  (physical, and its alignment), the indices' range, each vertex buffer's
+  address, alignment, size and stride, each fetch, and the color and depth
+  buffers;
+- `copy_vertices` copies every attribute to the ring (aligned, as many
+  vertices as the indices reach), to rule the window in or out; the other
+  switches that narrow a draw down are listed in the log at the start.

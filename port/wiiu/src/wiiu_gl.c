@@ -63,6 +63,7 @@ the first time.
 #include <string.h>
 
 #include <coreinit/cache.h>
+#include <coreinit/memorymap.h>
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <gx2/clear.h>
@@ -138,7 +139,7 @@ never reads the file, so every switch stays off. */
 static struct
 {
 	int loaded;
-	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes, native_shorts, no_gpu_check;
+	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes, native_shorts, no_gpu_check, unaligned_vertices, copy_vertices;
 	unsigned long log_at;
 	GLuint skip_programs[8];
 	int skip_count;
@@ -158,6 +159,10 @@ static void debug_describe(void)
 		debug.packed_unsigned ? "off" : "on", debug.native_cubes ? "off" : "on");
 	wiiu_log("gl: the GPU waited for after each step of the first %d frames that draw: %s (no_gpu_check)",
 		GPU_CHECK_FRAMES, debug.no_gpu_check ? "off" : "on");
+	wiiu_log("gl: vertex buffers on GX2_VERTEX_BUFFER_ALIGNMENT %s (unaligned_vertices), every attribute copied to the "
+		"ring %s (copy_vertices)", debug.unaligned_vertices ? "off" : "on", debug.copy_vertices ? "on" : "off");
+	wiiu_log("gl: other switches to narrow a draw down (gl.txt, a word each): no_draws no_depth no_blend no_cull "
+		"white_textures no_mips skip_program=N log_frame=N log_draws");
 }
 
 static void debug_load(void)
@@ -200,6 +205,8 @@ static void debug_load(void)
 		if (!strcmp(word, "native_cubes")) debug.native_cubes = 1;
 		if (!strcmp(word, "native_shorts")) debug.native_shorts = 1;
 		if (!strcmp(word, "no_gpu_check")) debug.no_gpu_check = 1;
+		if (!strcmp(word, "unaligned_vertices")) debug.unaligned_vertices = 1;
+		if (!strcmp(word, "copy_vertices")) debug.copy_vertices = 1;
 		sscanf(word, "log_at=%lu", &debug.log_at);
 		if (debug.skip_count < 8 && sscanf(word, "skip_program=%u", &debug.skip_programs[debug.skip_count]) == 1)
 			debug.skip_count++;
@@ -2811,6 +2818,33 @@ static GX2EndianSwapMode attribute_swap(const struct attribute *attribute, int a
 vertices) */
 static unsigned long draw_vertex_end;
 
+/* what the last draw gave GX2, for the log (draw_describe) */
+static struct
+{
+	const void *address[16];
+	unsigned long size[16], stride[16], slack[16];
+	int buffers;
+	GX2AttribStream streams[ATTRIBUTES];
+	int stream_count;
+} draw_record;
+
+/* GX2SetAttribBuffer, its base put on GX2_VERTEX_BUFFER_ALIGNMENT (the
+bytes below are the same memory's; slack is how far the vertices start
+past it) */
+static void attribute_buffer_set(int index, unsigned long size, unsigned long stride, const void *data)
+{
+	unsigned long slack = debug.unaligned_vertices ? 0 :
+		(unsigned long)((uintptr_t)data & (GX2_VERTEX_BUFFER_ALIGNMENT - 1));
+
+	GX2SetAttribBuffer((uint32_t)index, (uint32_t)(size + slack), (uint32_t)stride, (unsigned char *)data - slack);
+	draw_record.address[index] = (const unsigned char *)data - slack;
+	draw_record.size[index] = size + slack;
+	draw_record.stride[index] = stride;
+	draw_record.slack[index] = slack;
+	if (index + 1 > draw_record.buffers)
+		draw_record.buffers = index + 1;
+}
+
 static int setup_vertices(long base_vertex)
 {
 	GX2AttribStream streams[ATTRIBUTES];
@@ -2823,6 +2857,7 @@ static int setup_vertices(long base_vertex)
 	for (index = 0; index < BINDINGS; index++)
 		buffer_of_binding[index] = -1;
 	memset(streams, 0, sizeof(streams));
+	draw_record.buffers = 0;
 	for (index = 0; index < ATTRIBUTES; index++)
 	{
 		struct attribute *attribute = &gl.attributes[index];
@@ -2844,7 +2879,7 @@ static int setup_vertices(long base_vertex)
 			if (!buffer || !buffer->data)
 				return 0;
 			stream->endianSwap = attribute_swap(attribute, buffer->alias);
-			if ((attribute->relative_offset & 3) || (stride & 3))
+			if (debug.copy_vertices || (attribute->relative_offset & 3) || (stride & 3))
 			{
 				/* (the GPU fetches whole words: an attribute not on a word of its
 				vertex, such as a model vertex's node weight at byte 30, is copied
@@ -2868,9 +2903,9 @@ static int setup_vertices(long base_vertex)
 						memcpy(copy + vertex_index * slot, buffer->data + source, element_bytes);
 				}
 				gpu_written(copy, slot * draw_vertex_end, GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER);
-				GX2SetAttribBuffer((uint32_t)buffer_count, (uint32_t)(slot * draw_vertex_end), (uint32_t)slot, copy);
+				attribute_buffer_set(buffer_count, slot * draw_vertex_end, slot, copy);
 				stream->buffer = (uint32_t)buffer_count++;
-				stream->offset = 0;
+				stream->offset = (uint32_t)draw_record.slack[stream->buffer];
 			}
 			else
 			{
@@ -2883,12 +2918,16 @@ static int setup_vertices(long base_vertex)
 					/* (read where it is: buffers are in memory the GPU reads; the
 					base vertex is in the address, as on the Xbox 360, where the
 					GPU's own took none below zero) */
-					GX2SetAttribBuffer((uint32_t)buffer_count, (uint32_t)((long)buffer->size - start),
-						(uint32_t)stride, buffer->data + start);
+					/* (on GX2_VERTEX_BUFFER_ALIGNMENT, wut's gx2/enum.h, as
+					GX2R places buffers: the bytes below the vertices' start
+					are the buffer's, then each attribute's offset is that
+					much further on) */
+					attribute_buffer_set(buffer_count, (unsigned long)((long)buffer->size - start), stride,
+						buffer->data + start);
 					buffer_of_binding[attribute->binding] = buffer_count++;
 				}
 				stream->buffer = (uint32_t)buffer_of_binding[attribute->binding];
-				stream->offset = attribute->relative_offset;
+				stream->offset = attribute->relative_offset + draw_record.slack[stream->buffer];
 			}
 			if (draw_logged())
 			{
@@ -2932,7 +2971,7 @@ static int setup_vertices(long base_vertex)
 	if (constants)
 	{
 		gpu_written(constants, (unsigned long)constant_count * 16, GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER);
-		GX2SetAttribBuffer((uint32_t)constant_buffer, (uint32_t)constant_count * 16, (uint32_t)constant_count * 16,
+		attribute_buffer_set(constant_buffer, (unsigned long)constant_count * 16, (unsigned long)constant_count * 16,
 			constants);
 	}
 	{
@@ -2942,6 +2981,8 @@ static int setup_vertices(long base_vertex)
 			return 0;
 		GX2SetFetchShader(fetch);
 	}
+	memcpy(draw_record.streams, streams, sizeof(GX2AttribStream) * (size_t)count);
+	draw_record.stream_count = count;
 	return 1;
 }
 
@@ -2969,8 +3010,8 @@ static int draw_copies_attributes(void)
 		const struct attribute *attribute = &gl.attributes[index];
 
 		if (((draw_vertex->inputs >> index) & 1) && attribute->enabled && attribute->binding < BINDINGS &&
-			gl.bindings[attribute->binding].buffer &&
-			((attribute->relative_offset & 3) || (gl.bindings[attribute->binding].stride & 3)))
+			gl.bindings[attribute->binding].buffer && (debug.copy_vertices ||
+			(attribute->relative_offset & 3) || (gl.bindings[attribute->binding].stride & 3)))
 		{
 			return 1;
 		}
@@ -3042,6 +3083,74 @@ static const void *fan_as_list(unsigned long first, unsigned long count, const u
 	*list_count = triangles * 3;
 	*list_bytes = out_bytes;
 	return list;
+}
+
+/* everything GX2 is given for a draw, in the log: the first draws, and
+each program's first draw until the GPU has stopped (gpu_check_step names
+the one it stopped at) */
+static void draw_describe(GLenum mode, GX2PrimitiveMode primitive, unsigned long count, const void *indices,
+	unsigned long index_bytes)
+{
+	int index;
+
+	wiiu_log("gl: draw %lu (frame %lu, draw %lu of the frame), program %u: GL mode 0x%x as GX2 primitive %d, %lu %s",
+		gl.draws + 1, gl.frame, gl.frame_draws + 1, gl.program, mode, (int)primitive, count,
+		indices ? (index_bytes == 4 ? "indices, GX2_INDEX_TYPE_U32" : "indices, GX2_INDEX_TYPE_U16") : "vertices");
+	if (indices)
+	{
+		unsigned long at, low = 0xffffffffUL, high = 0;
+
+		for (at = 0; at < count; at++)
+		{
+			unsigned long value = index_bytes == 4 ? ((const uint32_t *)indices)[at] : ((const uint16_t *)indices)[at];
+
+			if (value < low)
+				low = value;
+			if (value > high)
+				high = value;
+		}
+		wiiu_log("gl:   indices at %p (physical %08lx, %lu past 0x20), from %lu to %lu: %lu %lu %lu %lu %lu %lu",
+			indices, (unsigned long)OSEffectiveToPhysical((uint32_t)(uintptr_t)indices),
+			(unsigned long)((uintptr_t)indices & 0x1f), low, high,
+			(unsigned long)(index_bytes == 4 ? ((const uint32_t *)indices)[0] : ((const uint16_t *)indices)[0]),
+			count > 1 ? (unsigned long)(index_bytes == 4 ? ((const uint32_t *)indices)[1] : ((const uint16_t *)indices)[1]) : 0UL,
+			count > 2 ? (unsigned long)(index_bytes == 4 ? ((const uint32_t *)indices)[2] : ((const uint16_t *)indices)[2]) : 0UL,
+			count > 3 ? (unsigned long)(index_bytes == 4 ? ((const uint32_t *)indices)[3] : ((const uint16_t *)indices)[3]) : 0UL,
+			count > 4 ? (unsigned long)(index_bytes == 4 ? ((const uint32_t *)indices)[4] : ((const uint16_t *)indices)[4]) : 0UL,
+			count > 5 ? (unsigned long)(index_bytes == 4 ? ((const uint32_t *)indices)[5] : ((const uint16_t *)indices)[5]) : 0UL);
+	}
+	for (index = 0; index < draw_record.buffers; index++)
+		wiiu_log("gl:   vertex buffer %d at %p (physical %08lx, %lu past 0x40), %lu bytes (%lu vertices), stride %lu, "
+			"the vertices %lu bytes in", index, draw_record.address[index],
+			(unsigned long)OSEffectiveToPhysical((uint32_t)(uintptr_t)draw_record.address[index]),
+			(unsigned long)((uintptr_t)draw_record.address[index] & 0x3f), draw_record.size[index],
+			draw_record.stride[index] ? draw_record.size[index] / draw_record.stride[index] : 0UL,
+			draw_record.stride[index], draw_record.slack[index]);
+	for (index = 0; index < draw_record.stream_count; index++)
+	{
+		const GX2AttribStream *stream = &draw_record.streams[index];
+
+		wiiu_log("gl:   fetch: location %u from buffer %u at %u, format 0x%x, %s, swap %d, mask %08x",
+			(unsigned int)stream->location, (unsigned int)stream->buffer, (unsigned int)stream->offset,
+			(unsigned int)stream->format, stream->type == GX2_ATTRIB_INDEX_PER_INSTANCE ? "per instance" : "per vertex",
+			(int)stream->endianSwap, (unsigned int)stream->mask);
+	}
+	if (gl.bound_color)
+		wiiu_log("gl:   color buffer at %p (physical %08lx), %ux%u, format 0x%x, tile mode %d, pitch %u, %u bytes, "
+			"aligned 0x%x", gl.bound_color->surface.image,
+			(unsigned long)OSEffectiveToPhysical((uint32_t)(uintptr_t)gl.bound_color->surface.image),
+			(unsigned int)gl.bound_color->surface.width, (unsigned int)gl.bound_color->surface.height,
+			(unsigned int)gl.bound_color->surface.format, (int)gl.bound_color->surface.tileMode,
+			(unsigned int)gl.bound_color->surface.pitch, (unsigned int)gl.bound_color->surface.imageSize,
+			(unsigned int)gl.bound_color->surface.alignment);
+	if (gl.bound_depth)
+		wiiu_log("gl:   depth buffer at %p (physical %08lx), %ux%u, format 0x%x, tile mode %d, %u bytes, aligned 0x%x, "
+			"hi-z %p", gl.bound_depth->surface.image,
+			(unsigned long)OSEffectiveToPhysical((uint32_t)(uintptr_t)gl.bound_depth->surface.image),
+			(unsigned int)gl.bound_depth->surface.width, (unsigned int)gl.bound_depth->surface.height,
+			(unsigned int)gl.bound_depth->surface.format, (int)gl.bound_depth->surface.tileMode,
+			(unsigned int)gl.bound_depth->surface.imageSize, (unsigned int)gl.bound_depth->surface.alignment,
+			gl.bound_depth->hiZPtr);
 }
 
 static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GLenum index_type, const void *indices,
@@ -3119,6 +3228,12 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 		}
 	}
 	gpu_check_arm();
+	{
+		struct program *program = object_get(gl.program, _object_program);
+
+		if (gl.draws < 3 || (program && !program->gpu_checked && !watch.check_failed && !debug.no_gpu_check))
+			draw_describe(mode, primitive, count, source, index_bytes);
+	}
 	if (source)
 	{
 		/* (the indices are the CPU's words, where they are) */
@@ -3806,10 +3921,29 @@ static void APIENTRY wiiu_glClear(GLbitfield mask)
 	}
 	if (color)
 		targets_written();
-	/* (in the frames gpu_check covers, from the second frame that draws on) */
+	/* (in the frames gpu_check covers, from the second frame that draws on;
+	and the first clear of each framebuffer in any frame) */
 	if (gl.draws)
 		gpu_check_arm();
-	gpu_check(color && depth ? "clear of color and depth" : color ? "clear of color" : "clear of depth");
+	{
+		static GLuint cleared[32];
+		static int cleared_count;
+		int seen = 0, at;
+
+		for (at = 0; at < cleared_count; at++)
+			seen |= cleared[at] == gl.draw_framebuffer;
+		if (!seen && cleared_count < 32)
+		{
+			cleared[cleared_count++] = gl.draw_framebuffer;
+			if (!watch.check_failed && !debug.no_gpu_check)
+				wiiu_log("gl: framebuffer %u's first clear (%s%s%s), color %p tile mode %d, depth %p tile mode %d",
+					gl.draw_framebuffer, color ? "color" : "", color && depth ? " and " : "", depth ? "depth" : "",
+					color ? gl.bound_color->surface.image : NULL, color ? (int)gl.bound_color->surface.tileMode : -1,
+					depth ? gl.bound_depth->surface.image : NULL, depth ? (int)gl.bound_depth->surface.tileMode : -1);
+		}
+		gpu_check_step(color && depth ? "clear of color and depth" : color ? "clear of color" : "clear of depth",
+			!seen);
+	}
 }
 
 
