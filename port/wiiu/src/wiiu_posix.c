@@ -762,6 +762,25 @@ int open(const char *path, int flags, ...)
 	}
 	if (access == O_WRONLY && !common)
 		flags = (flags & ~O_ACCMODE) | O_RDWR;
+	/* (reading and writing a file made if it is not there, as OPEN_ALWAYS
+	asks: made first, on its own, and closed, then opened as one that is
+	there; a write to a file the device had just made this way never
+	returned on the console, while one that was there took its writes) */
+	if ((flags & O_ACCMODE) == O_RDWR && (flags & O_CREAT) && !(flags & (O_TRUNC | O_APPEND)))
+	{
+		struct stat status;
+
+		if (stat(path, &status) != 0)
+		{
+			int made = _open_r(_REENT, path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+			if (made < 0)
+				return -1;
+			close(made);
+			wiiu_log("files: made %s empty first", path);
+		}
+		flags &= ~O_CREAT;
+	}
 	else if (access == O_RDWR && common == O_TRUNC)
 	{
 		struct stat status;
