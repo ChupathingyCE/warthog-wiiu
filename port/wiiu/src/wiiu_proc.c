@@ -25,6 +25,7 @@ static int proc_exiting;
 static int proc_in_service;
 static OSThread *proc_thread;
 static OSTime proc_last_service;
+static ProcUIStatus proc_status;
 
 /* The game's end, however it comes (its Quit, a failed assertion's halt):
 an application ends when ProcUI says so, never by itself, or the console
@@ -144,9 +145,25 @@ void wiiu_proc_poll(void)
 		return;
 	proc_last_service = now;
 	proc_in_service = 1;
-	/* (not blocking while in the foreground; the release and the wait in the
-	background are the update's code) */
-	switch (ProcUIProcessMessages(FALSE))
+	/* (TRUE, as the system's own samples ask: it returns at once while the
+	game is in the foreground, and the first call with FALSE never returned
+	on the console; the release and the wait in the background are the
+	update's code) */
+	{
+		static int traced;
+		ProcUIStatus status;
+
+		if (traced < 3)
+			wiiu_log("system: messages taken (%d)", traced);
+		status = ProcUIProcessMessages(TRUE);
+		if (traced < 3)
+		{
+			traced++;
+			wiiu_log("system: messages answered %d", (int)status);
+		}
+		proc_status = status;
+	}
+	switch (proc_status)
 	{
 	case PROCUI_STATUS_IN_FOREGROUND:
 		break;
