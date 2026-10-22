@@ -22,6 +22,7 @@ next) */
 #define SCREEN_COLUMNS 66
 
 static int screen_state; /* 0 not started, 1 showing, -1 stopped */
+static int screen_released; /* the HOME button menu has the screens */
 static void *buffers[2];
 static unsigned int buffer_sizes[2];
 static char lines[SCREEN_LINES][SCREEN_COLUMNS + 1];
@@ -81,7 +82,7 @@ void wiiu_screen_update(void)
 	char shown[SCREEN_LINES][SCREEN_COLUMNS + 1];
 	int screen, line, count;
 
-	if (screen_state < 0 || !lines_changed)
+	if (screen_state < 0 || screen_released || !lines_changed)
 		return;
 	if (!screen_state)
 		screen_start();
@@ -120,4 +121,30 @@ void wiiu_screen_stop(void)
 		MEMFreeToDefaultHeap(buffers[1]);
 	}
 	screen_state = -1;
+}
+
+/* The foreground given up (the HOME button menu): the screens and their
+buffers are let go, as WHBLogConsole lets go of its own, and made again on
+return. */
+void wiiu_screen_release(void)
+{
+	if (screen_state != 1)
+	{
+		screen_released = 1;
+		return;
+	}
+	wiiu_log("screen: OSScreen shut down");
+	OSScreenShutdown();
+	MEMFreeToDefaultHeap(buffers[0]);
+	MEMFreeToDefaultHeap(buffers[1]);
+	buffers[0] = buffers[1] = NULL;
+	screen_state = 0;
+	screen_released = 1;
+}
+
+void wiiu_screen_acquire(void)
+{
+	screen_released = 0;
+	lines_changed = 1;
+	wiiu_log("screen: ready to start again");
 }

@@ -36,6 +36,12 @@ static int log_started;
 /* a line being put together from writes without its newline yet */
 static char pending[512];
 static size_t pending_length;
+/* the lines kept in memory while the HOME button menu has the foreground
+(the SD card may not be written then): written out on return */
+#define HELD_LINES 64
+static int log_held;
+static char held[HELD_LINES][256];
+static int held_count;
 
 static void log_initialize(void)
 {
@@ -51,6 +57,16 @@ static void log_line(const char *line)
 {
 	OSReport("%s\n", line);
 	wiiu_screen_line(line);
+	if (log_held)
+	{
+		if (held_count < HELD_LINES)
+		{
+			strncpy(held[held_count], line, sizeof(held[0]) - 1);
+			held[held_count][sizeof(held[0]) - 1] = 0;
+			held_count++;
+		}
+		return;
+	}
 	if (log_file_failed)
 		return;
 	/* (opened for each line, while the port is brought up: a crash or a
@@ -176,4 +192,27 @@ __attribute__((constructor(101))) static void log_attach(void)
 	logs are found from there, as beside a desktop build's executable */
 	if (chdir(WIIU_APP_FOLDER) != 0)
 		wiiu_log("cannot use %s as the game's folder", WIIU_APP_FOLDER);
+}
+
+/* lines kept in memory (held) or written out again (not held) */
+void wiiu_log_hold(int on)
+{
+	int index, count;
+	static char out[HELD_LINES][256];
+
+	log_initialize();
+	OSLockMutex(&log_mutex);
+	if (on)
+	{
+		log_held = 1;
+		OSUnlockMutex(&log_mutex);
+		return;
+	}
+	log_held = 0;
+	count = held_count;
+	memcpy(out, held, sizeof(held));
+	held_count = 0;
+	for (index = 0; index < count; index++)
+		log_line(out[index]);
+	OSUnlockMutex(&log_mutex);
 }

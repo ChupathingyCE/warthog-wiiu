@@ -48,8 +48,43 @@ static void proc_end(void)
 				ProcUIDrawDoneRelease();
 		}
 	}
+	wiiu_log_hold(0);
 	wiiu_audio_shutdown();
 	ProcUIShutdown();
+}
+
+/* The foreground's resources, let go and taken again where ProcUI says so
+(its callbacks run inside ProcUIProcessMessages, on this thread). The
+audio is left alone, as the system's samples leave it: ProcUI suspends the
+game's other threads once the release is done. */
+static uint32_t proc_release(void *context)
+{
+	(void)context;
+	wiiu_log("system: release 1/3, the foreground released (HOME button menu)");
+	wiiu_log("system: release 2/3, the log held in memory");
+	wiiu_log_hold(1);
+	wiiu_screen_release();
+	wiiu_log("system: release 3/3, the screens let go");
+	return 0;
+}
+
+static uint32_t proc_acquire(void *context)
+{
+	(void)context;
+	wiiu_log_hold(0);
+	wiiu_log("system: acquire 1/2, the foreground is back");
+	wiiu_screen_acquire();
+	wiiu_log("system: acquire 2/2, the screens come back at the next frame");
+	return 0;
+}
+
+static uint32_t proc_exit_callback(void *context)
+{
+	(void)context;
+	wiiu_log_hold(0);
+	wiiu_log("system: exit asked for (Close in the HOME button menu)");
+	wiiu_log_flush();
+	return 0;
 }
 
 static void proc_initialize(void)
@@ -59,6 +94,9 @@ static void proc_initialize(void)
 	ProcUIInit(&OSSavesDone_ReadyToRelease);
 	/* (ProcUI is driven from this thread alone: its messages are taken here) */
 	proc_thread = OSGetCurrentThread();
+	ProcUIRegisterCallback(PROCUI_CALLBACK_RELEASE, proc_release, NULL, 100);
+	ProcUIRegisterCallback(PROCUI_CALLBACK_ACQUIRE, proc_acquire, NULL, 100);
+	ProcUIRegisterCallback(PROCUI_CALLBACK_EXIT, proc_exit_callback, NULL, 100);
 	/* (the HOME button opens its menu; the system's default, said outright) */
 	OSEnableHomeButtonMenu(TRUE);
 	/* (AX started, which silences the Wii U Menu's music) */
@@ -93,12 +131,8 @@ static int proc_service(void)
 		switch (status)
 		{
 		case PROCUI_STATUS_IN_FOREGROUND:
-			wiiu_audio_startup();
 			return 1;
 		case PROCUI_STATUS_RELEASE_FOREGROUND:
-			wiiu_log("system: the foreground released (HOME button menu)");
-			wiiu_log_flush();
-			wiiu_audio_shutdown();
 			ProcUIDrawDoneRelease();
 			break;
 		case PROCUI_STATUS_IN_BACKGROUND:
@@ -106,6 +140,7 @@ static int proc_service(void)
 			break;
 		case PROCUI_STATUS_EXITING:
 		default:
+			wiiu_log("system: ProcUI says to exit");
 			proc_exiting = 1;
 			return 0;
 		}
@@ -168,9 +203,6 @@ void wiiu_proc_poll(void)
 	case PROCUI_STATUS_IN_FOREGROUND:
 		break;
 	case PROCUI_STATUS_RELEASE_FOREGROUND:
-		wiiu_log("system: the foreground released (HOME button menu)");
-		wiiu_log_flush();
-		wiiu_audio_shutdown();
 		ProcUIDrawDoneRelease();
 		/* (waits here until the game has the foreground again, or is to end) */
 		if (!proc_service())

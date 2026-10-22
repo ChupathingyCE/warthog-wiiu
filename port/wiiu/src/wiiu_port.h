@@ -22,6 +22,9 @@ void wiiu_screen_update(void);
 void wiiu_log_lock(void);
 void wiiu_log_unlock(void);
 void wiiu_screen_stop(void);
+void wiiu_screen_release(void);
+void wiiu_screen_acquire(void);
+void wiiu_log_hold(int held);
 
 /* the window and the heap, in the log (wiiu_memory.c) */
 void wiiu_memory_report(void);
