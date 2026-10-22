@@ -59,6 +59,11 @@ void wiiu_video_swap(void);
 void wiiu_video_idle(void);
 void wiiu_video_shutdown(void);
 
+/* the end, noted step by step to FSA directly (wiiu_exit.c) */
+void wiiu_exit_begin(void);
+void wiiu_exit_phase(const char *text);
+void wiiu_exit_threads(const char *when);
+
 /* the system's messages (wiiu_proc.c): 0 once the game is to end */
 int wiiu_proc_update(void);
 void wiiu_proc_request_quit(void);

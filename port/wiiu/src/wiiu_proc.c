@@ -36,6 +36,8 @@ ProcUI says to exit, the screens let go, ProcUIShutdown last. Every step is
 logged and flushed before the next, for the one that does not return. */
 static void proc_end(void)
 {
+	wiiu_exit_begin();
+	wiiu_exit_phase("proc_end: begun");
 	wiiu_log("system: the game ended");
 	wiiu_log_flush();
 	wiiu_audio_shutdown();
@@ -70,6 +72,8 @@ static void proc_end(void)
 	wiiu_log_flush();
 	wiiu_log("system: the game's end, to the system's exit");
 	wiiu_log_flush();
+	wiiu_exit_threads("threads at the end of proc_end:");
+	wiiu_exit_phase("proc_end: done");
 }
 
 /* The foreground's resources, let go and taken again where ProcUI says so
