@@ -92,42 +92,103 @@ setup (the seek past the end above), then at the renderer's missing device.
 `port/linux/src/d3d8_gl.c`, unchanged) draws through an OpenGL layer over
 GX2, `src/wiiu_gl.c`, arranged as the Xbox 360's `x360_gl.c` over Direct3D
 9. The main menu draws whole (the ring, the planet, the stars, the menus),
-and Blood Gulch loads and draws: the level, the sky, the first-person
-weapon and the HUD. Screenshots: `showcase/wiiu-night/` (owner's work
-folder), `*-menu4.png` and `*-bg1.png`.
+and Blood Gulch loads and draws as on the desktop and the Xbox 360: the
+level lit by its lightmaps and bump maps, the sky, the first-person weapon
+with its reflections, the HUD. Not yet seen on a console.
 
 How it is put together (the file's comment has the details):
 
 - Shaders: the GLSL `d3d8_gl.c` makes, compiled one by one by CafeGLSL in
-  register mode, as the game asks for them. The varyings are given
-  locations by name before they are compiled, so any vertex shader goes
-  with any fragment shader (Latte matches them by semantic, which CafeGLSL
-  makes from the location). Each vertex shader's depth is made OpenGL's as
-  it ends (z' = 2z - w): GX2's viewport puts y = 1 on the first row, as
-  Direct3D does, but its depth is OpenGL's (decaf's GX2SetViewport).
+  register mode, as the game asks for them, and kept on the SD card
+  (`src/wiiu_shader_cache.c`, `sd:/wiiu/apps/halo/shaders`, by a hash of the
+  text and the compiler's version): the main menu's 50 shaders took 6.4 s
+  to compile in Cemu and 37 ms to read back the next run. The varyings are
+  given locations by name before they are compiled, so any vertex shader
+  goes with any fragment shader (Latte matches them by semantic, which
+  CafeGLSL makes from the location). Each vertex shader's depth is made
+  OpenGL's as it ends (z' = 2z - w): GX2's viewport puts y = 1 on the first
+  row, as Direct3D does, but its depth is OpenGL's (decaf's GX2SetViewport).
 - Uniforms: CafeGLSL lists an array's elements on their own ("c[1]" after
   "c" and "c[0]"); an array is taken from its first. Values are set with
   GX2SetVertexUniformReg and GX2SetPixelUniformReg, all of a program's when
   it is newly in use, else the range written since.
 - Textures are linear surfaces, drawn into where they are sampled (SDL's
   Wii U render targets), BGRA texels swapped to RGBA as they are copied,
-  DXT blocks as they are (GX2's surfaces take no byte swap). Depth
-  attachments are GX2 depth buffers of their own.
+  DXT blocks as they are (GX2's surfaces take no byte swap). Cube maps and
+  volumes are in GX2's tiling, written through linear surfaces and
+  GX2CopySurface (Cemu read linear cube maps as black). Depth attachments
+  are GX2 depth buffers of their own.
 - Vertices: the map's (the Xbox window, which `d3d8_gl.c` aliases with
   `console_gl_buffer_alias` under `HALO_CONSOLE_GL_LAYER`) are fetched
   without a byte swap, the CPU's with the swap of their element's size.
   Attributes not on a word are copied, as on the 360. Fetch shaders are
   made per layout and kept.
-- Culling: in Cemu a strip's triangles came out wound the other way from a
-  list's or a fan's, so strips and fans are drawn as lists in GL's order.
-  To compare on the console: the bring-up switch `native_strips`.
-- Cemu decodes no single 16-bit attribute: one short is fetched as two.
+
+What Cemu needed, each with a bring-up switch to compare on the console
+(none of these is known yet to be needed on hardware):
+
+- Strips and fans are drawn as lists in GL's order: a strip's triangles
+  came out wound the other way from a list's or a fan's (`native_strips`).
+- One short attribute is fetched as two: Cemu decodes no single 16-bit
+  attribute.
+- The packed normals (`unpack_normpacked3`, nv2a_vsh.c) are unpacked with
+  unsigned shifts and masks: with the arithmetic shifts the bump-mapped
+  lighting's light vectors were wrong and the ground was black near the
+  camera (`packed_unsigned` keeps the original).
+- Cube maps are read as arrays of their faces by a lookup in the shader
+  (OpenGL's sc, tc, ma table, its level of detail from the direction's
+  gradients): CafeGLSL's cube lookups read the wrong face and place in Cemu
+  (`cube_probe` samples a labeled cube in 24 directions, reads the pixels
+  back and logs them; `native_cubes` keeps CafeGLSL's lookups).
+  textureGrad came out wrong in Cemu, textureLod right.
 
 Bring-up switches (`--wiiu-gl-switches` at configure, then words in
-`sd:/wiiu/apps/halo/gl.txt`): `log_draws`, `log_frame=N`, `no_draws`,
-`no_cull`, `no_depth`, `no_blend`, `swap_winding`, `native_strips`,
-`white_textures`, `clear_red`, `trace`.
+`sd:/wiiu/apps/halo/gl.txt`): `log_draws`, `log_frame=N`, `log_at=SECONDS`,
+`log_textures`, `trace`, `no_draws`, `no_cull`, `no_depth`, `no_blend`,
+`no_mips`, `lequal`, `dst_alpha_one`, `skip_fog`, `skip_program=N`,
+`swap_winding`, `white_textures`, `clear_red`, `screen_magenta`,
+`blit_green`, `math_cubes`, and the four above. A logged frame also writes
+each program's GLSL beside the log (`p<program>.vert`, `.frag`).
 
-**Not yet.** Blood Gulch's ground is too dark near the camera (next to
-look at). Shaders are compiled every run (no cache on the SD card yet).
-Scissored depth clears, MSAA, glReadPixels.
+Screenshots: the owner's `showcase/wiiu-night/` (`*-mainmenu-cached-shaders`,
+`*-bloodgulch-correct`, and `*-reference-macos-bloodgulch` from the macOS
+build at the same spawn).
+
+**Not yet.** Scissored depth clears (never seen used), MSAA, glReadPixels.
+Hardware: everything above.
+
+## Milestone 4: the controllers and the sound (2026-10-22)
+
+**Input, in Cemu.** `debug.test_input` (menu:, bot:, look:) works on the
+Wii U as on the desktop (`platform/wiiu_input.c`), over the first
+controller's state, so the menus can be driven without a hand on a
+controller: in Cemu, `menu:` presses moved the main menu to MULTIPLAYER and
+A on CAMPAIGN opened the new profile's name screen. Presses are held for
+600 ms of their second (a frame takes about 300 ms in Cemu's interpreter).
+The GamePad and Pro Controller themselves (`src/wiiu_pad.c`) are not tested:
+Cemu's emulated controllers take the host's input, which an overnight run
+does not give.
+
+**Sound, in Cemu.** `src/wiiu_audio.c` plays the mixer's float stereo on
+two AX voices the way SDL's Wii U audio does: 16-bit big-endian samples,
+deinterleaved into two buffers each voice loops over, AX's frame callback
+moving the loop to the buffer filled next, a thread of the port's filling
+them, the voices made on AX's core and again when AX restarts after the
+HOME button menu. The log every 30 s counts AX frames, buffers filled and
+the loudest sample: the main menu's music reaches the voices. In Cemu's
+interpreter, mixing a 21 ms buffer takes about 20 ms, so the filling thread
+keeps up with only half the buffers and each plays twice; the console's CPU
+is the measure (not chased).
+
+## Performance in Cemu (interpreter, not chased)
+
+- Main menu: about 200 ms a frame (5 frames a second); Blood Gulch about
+  400 ms a frame, 123 draws.
+- Shaders: about 130 ms each to compile in Cemu, 0.7 ms to read back from
+  the SD card.
+- Cemu's recompiler still stops in the menus' tags (milestone 2), so every
+  run is an interpreter run.
+
+**Next.** On the console: the switches above, one at a time, to learn
+which of Cemu's needs hardware shares; the frame time; the GamePad and Pro
+Controller; the sound.

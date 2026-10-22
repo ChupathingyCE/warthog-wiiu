@@ -69,6 +69,7 @@ static struct
 	volatile int thread_running;
 	/* what the log says, now and then */
 	volatile unsigned long callbacks, filled, bad_buffers;
+	OSTime fill_time;
 	float peak;
 } audio;
 
@@ -277,14 +278,19 @@ static int audio_thread(int argument, const char **unused)
 		}
 		else
 		{
+			OSTime start = OSGetSystemTime();
+
 			audio_buffer_fill(audio.rendering);
+			audio.fill_time += OSGetSystemTime() - start;
 			audio.rendering = (audio.rendering + 1) % AUDIO_BUFFERS;
 		}
 		if (OSTicksToMilliseconds(OSGetSystemTime() - last_report) >= 30000)
 		{
 			last_report = OSGetSystemTime();
-			wiiu_log("audio: %lu AX frames, %lu buffers filled, %lu lost track, loudest %.3f", audio.callbacks,
-				audio.filled, audio.bad_buffers, (double)audio.peak);
+			wiiu_log("audio: %lu AX frames, %lu buffers filled (%lu us each to mix), %lu lost track, loudest %.3f",
+				audio.callbacks, audio.filled, audio.filled ?
+				(unsigned long)(OSTicksToMicroseconds(audio.fill_time) / audio.filled) : 0UL, audio.bad_buffers,
+				(double)audio.peak);
 			audio.peak = 0.0f;
 		}
 	}

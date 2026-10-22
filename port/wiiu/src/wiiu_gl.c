@@ -4429,7 +4429,17 @@ void wiiu_gl_frame_end(void)
 	}
 #ifdef HALO_WIIU_GL_SWITCHES
 	if (gl.frame == 1 || gl.frame % 300 == 0)
-		wiiu_log("gl: frame %lu, %lu draws in the last", gl.frame, gl.frame_draws);
+	{
+		static OSTime last;
+		static unsigned long last_frame;
+		OSTime now = OSGetSystemTime();
+
+		wiiu_log("gl: frame %lu, %lu draws in the last; %lu ms a frame since frame %lu", gl.frame, gl.frame_draws,
+			last && gl.frame > last_frame ? (unsigned long)(OSTicksToMilliseconds(now - last) / (gl.frame - last_frame)) : 0UL,
+			last_frame);
+		last = now;
+		last_frame = gl.frame;
+	}
 #endif
 	gl.frame_draws = 0;
 }
