@@ -132,7 +132,7 @@ never reads the file, so every switch stays off. */
 static struct
 {
 	int loaded;
-	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned;
+	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes;
 	unsigned long log_at;
 	GLuint skip_programs[8];
 	int skip_count;
@@ -170,6 +170,9 @@ static void debug_load(void)
 		if (!strcmp(word, "lequal")) debug.equal_as_lequal = 1;
 		if (!strcmp(word, "skip_fog")) debug.skip_fog = 1;
 		if (!strcmp(word, "packed_unsigned")) debug.packed_unsigned = 1;
+		if (!strcmp(word, "math_cubes")) debug.math_cubes = 1;
+		if (!strcmp(word, "cube_probe")) debug.cube_probe = 1;
+		if (!strcmp(word, "native_cubes")) debug.native_cubes = 1;
 		sscanf(word, "log_at=%lu", &debug.log_at);
 		if (debug.skip_count < 8 && sscanf(word, "skip_program=%u", &debug.skip_programs[debug.skip_count]) == 1)
 			debug.skip_count++;
@@ -245,6 +248,9 @@ struct texture
 	GX2ColorBuffer *color_buffers[MAXIMUM_LEVELS];
 	GX2DepthBuffer *depth_buffer;
 	void *depth_memory;
+	/* a cube map seen as an array of its six faces (cube_lookup) */
+	GX2Texture array_view;
+	int array_view_made;
 };
 
 struct buffer
@@ -283,6 +289,9 @@ struct shader
 	GX2VertexShader *vertex;
 	GX2PixelShader *pixel;
 	unsigned long inputs;
+	/* the texN samplers declared as cube maps and read as arrays of faces
+	(bit N) */
+	unsigned long cube_arrays;
 	char log[256];
 	int attachments;
 	int deleted;
@@ -301,6 +310,7 @@ struct uniform
 	int sampler;
 	int sampler_location;
 	int sampler_slot;        /* the target it samples: 2D, 3D, cube */
+	int cube_array;          /* a cube map read as an array of faces */
 	GLint unit;
 };
 
@@ -745,6 +755,7 @@ static void texture_component_map(struct texture *texture)
 		texture->gx2.compMap = GX2_COMP_MAP(swizzle_select(texture->swizzle[0]), swizzle_select(texture->swizzle[1]),
 			swizzle_select(texture->swizzle[2]), swizzle_select(texture->swizzle[3]));
 	GX2InitTextureRegs(&texture->gx2);
+	texture->array_view_made = 0;
 }
 
 /* (re)makes the texture's surface for this size and format */
@@ -1287,10 +1298,99 @@ static int varying_location(const char *name, size_t length)
 
 /* the text as CafeGLSL is given it: each varying given its location, and a
 vertex shader's depth made OpenGL's as it ends (the file's comment) */
+/* A cube map's lookup as OpenGL defines it, done in the shader: the face
+by the major axis, its coordinates from the other two (the specification's
+table of sc, tc and ma, "Cube Map Texture Selection"), read from the faces
+as an array. In Cemu, CafeGLSL's cube map lookups read the wrong face and
+place (the bring-up switch cube_probe logs them: the face followed the
+sign of the first minor axis, whichever the major), which made the
+normalization cubes of the maps' bump-mapped lighting give faceted, dark
+cliffs; read this way they are right. Filtering does not cross a face's
+edge. The bring-up switch native_cubes keeps CafeGLSL's lookups, to compare
+on the console. The level of detail is the cube's, worked out here from the
+direction's gradients, which do not jump at a face's edge as the face's
+coordinates do (textureGrad came out wrong in Cemu: the world drawn as
+flat fog). */
+static const char cube_lookup_source[] =
+	"vec4 wiiu_cube(sampler2DArray faces, vec3 d)\n"
+	"{\n"
+	"\tvec3 a = abs(d);\n"
+	"\tvec3 s_axis, t_axis, m_axis;\n"
+	"\tfloat face;\n"
+	"\tif (a.x >= a.y && a.x >= a.z)\n"
+	"\t{\n"
+	"\t\tfloat sign_x = d.x >= 0.0 ? 1.0 : -1.0;\n"
+	"\t\tface = d.x >= 0.0 ? 0.0 : 1.0;\n"
+	"\t\ts_axis = vec3(0.0, 0.0, -sign_x); t_axis = vec3(0.0, -1.0, 0.0); m_axis = vec3(sign_x, 0.0, 0.0);\n"
+	"\t}\n"
+	"\telse if (a.y >= a.z)\n"
+	"\t{\n"
+	"\t\tfloat sign_y = d.y >= 0.0 ? 1.0 : -1.0;\n"
+	"\t\tface = d.y >= 0.0 ? 2.0 : 3.0;\n"
+	"\t\ts_axis = vec3(1.0, 0.0, 0.0); t_axis = vec3(0.0, 0.0, sign_y); m_axis = vec3(0.0, sign_y, 0.0);\n"
+	"\t}\n"
+	"\telse\n"
+	"\t{\n"
+	"\t\tfloat sign_z = d.z >= 0.0 ? 1.0 : -1.0;\n"
+	"\t\tface = d.z >= 0.0 ? 4.0 : 5.0;\n"
+	"\t\ts_axis = vec3(sign_z, 0.0, 0.0); t_axis = vec3(0.0, -1.0, 0.0); m_axis = vec3(0.0, 0.0, sign_z);\n"
+	"\t}\n"
+	"\tfloat ma = max(dot(m_axis, d), 1.0e-20);\n"
+	"\tvec2 sc = vec2(dot(s_axis, d), dot(t_axis, d));\n"
+	"\tvec3 dx = dFdx(d), dy = dFdy(d);\n"
+	"\tvec2 gx = 0.5 * (vec2(dot(s_axis, dx), dot(t_axis, dx)) * ma - sc * dot(m_axis, dx)) / (ma * ma);\n"
+	"\tvec2 gy = 0.5 * (vec2(dot(s_axis, dy), dot(t_axis, dy)) * ma - sc * dot(m_axis, dy)) / (ma * ma);\n"
+	"\tvec2 size = vec2(textureSize(faces, 0).xy);\n"
+	"\tfloat rho = max(length(gx * size), length(gy * size));\n"
+	"\treturn textureLod(faces, vec3(0.5 * (sc / ma + 1.0), face), log2(max(rho, 1.0e-6)));\n"
+	"}\n";
+
+/* a fragment shader's cube maps made arrays of faces read by wiiu_cube;
+the texN made so in *cube_arrays (bit N) */
+static void shader_cube_arrays(char *text, unsigned long *cube_arrays)
+{
+	int stage;
+	char *after_version;
+
+	for (stage = 0; stage < 8; stage++)
+	{
+		char declaration[40], call[24], replacement[24];
+		char *at;
+
+		snprintf(declaration, sizeof(declaration), "uniform samplerCube tex%d;", stage);
+		at = strstr(text, declaration);
+		if (!at)
+			continue;
+		/* (samplerCube to sampler2DArray: the same length but one) */
+		memmove(at + 8 + 14, at + 8 + 11, strlen(at + 8 + 11) + 1);
+		memcpy(at + 8, "sampler2DArray", 14);
+		snprintf(call, sizeof(call), "texture(tex%d,", stage);
+		snprintf(replacement, sizeof(replacement), "wiiu_cube(tex%d,", stage);
+		while ((at = strstr(text, call)) != NULL)
+		{
+			memmove(at + strlen(replacement), at + strlen(call), strlen(at + strlen(call)) + 1);
+			memcpy(at, replacement, strlen(replacement));
+		}
+		*cube_arrays |= 1UL << stage;
+	}
+	if (!*cube_arrays)
+		return;
+	/* (the lookup after the #version line) */
+	after_version = strchr(text, '\n');
+	if (after_version)
+	{
+		size_t length = strlen(cube_lookup_source);
+
+		after_version++;
+		memmove(after_version + length, after_version, strlen(after_version) + 1);
+		memcpy(after_version, cube_lookup_source, length);
+	}
+}
+
 static char *shader_text(const char *source, int vertex)
 {
 	size_t size = strlen(source);
-	char *text = malloc(size * 2 + 2048);
+	char *text = malloc(size * 2 + 4096);
 	const char *line = source;
 	char *out = text;
 
@@ -1346,6 +1446,30 @@ static char *shader_text(const char *source, int vertex)
 	}
 	*out = '\0';
 	debug_load();
+	if (!vertex && debug.math_cubes)
+	{
+		/* (bring-up: each cube map's lookup made the normalization cube's
+		answer, computed: to tell the cube maps' sampling from the rest) */
+		int stage;
+
+		for (stage = 0; stage < 4; stage++)
+		{
+			char find[64], declaration[40], replace[96];
+			char *at;
+
+			snprintf(declaration, sizeof(declaration), "samplerCube tex%d;", stage);
+			if (!strstr(text, declaration))
+				continue;
+			snprintf(find, sizeof(find), "texture(tex%d, (xT%d).xyz)", stage, stage);
+			snprintf(replace, sizeof(replace), "vec4(normalize((xT%d).xyz) * 0.5 + 0.5, 1.0)", stage);
+			at = strstr(text, find);
+			if (at)
+			{
+				memmove(at + strlen(replace), at + strlen(find), strlen(at + strlen(find)) + 1);
+				memcpy(at, replace, strlen(replace));
+			}
+		}
+	}
 	if (vertex && !debug.packed_unsigned)
 	{
 		/* (the packed normals' fields taken with unsigned shifts and masks,
@@ -1443,6 +1567,9 @@ static int shader_compile(struct shader *shader)
 	text = shader_text(shader->source, vertex);
 	if (!text)
 		return 0;
+	debug_load();
+	if (!vertex && !debug.native_cubes)
+		shader_cube_arrays(text, &shader->cube_arrays);
 	start = OSGetSystemTime();
 	shader->log[0] = '\0';
 	if (vertex)
@@ -1655,6 +1782,13 @@ static void program_uniforms(struct program *program, struct shader *vertex, str
 		uniform->sampler_location = (int)variable->location;
 		uniform->sampler_slot = variable->type == GX2_SAMPLER_VAR_TYPE_SAMPLER_3D ? 1 :
 			variable->type == GX2_SAMPLER_VAR_TYPE_SAMPLER_CUBE ? 2 : 0;
+		uniform->cube_array = 0;
+		if (!strncmp(variable->name, "tex", 3) && variable->name[3] >= '0' && variable->name[3] <= '7' &&
+			!variable->name[4] && ((fragment->cube_arrays >> (variable->name[3] - '0')) & 1))
+		{
+			uniform->sampler_slot = 2;
+			uniform->cube_array = 1;
+		}
 		uniform->count = 1;
 	}
 	program->vertex_dirty_low = program->pixel_dirty_low = UNIFORM_COMPONENTS;
@@ -2157,7 +2291,22 @@ static int prepare_draw(void)
 				(unsigned int)texture->gx2.surface.format, texture->defined_levels, texture->levels, parameters->min_filter,
 				parameters->mag_filter, parameters->wrap_s, parameters->wrap_t, texture == gl.empty[uniform->sampler_slot] ?
 				" (nothing bound)" : "");
-		GX2SetPixelTexture(&texture->gx2, (uint32_t)uniform->sampler_location);
+		if (uniform->cube_array && texture->target == GL_TEXTURE_CUBE_MAP)
+		{
+			/* (the cube's faces as an array: its surface, seen as six
+			slices) */
+			if (!texture->array_view_made)
+			{
+				texture->array_view = texture->gx2;
+				texture->array_view.surface.dim = GX2_SURFACE_DIM_TEXTURE_2D_ARRAY;
+				texture->array_view.viewNumSlices = 6;
+				GX2InitTextureRegs(&texture->array_view);
+				texture->array_view_made = 1;
+			}
+			GX2SetPixelTexture(&texture->array_view, (uint32_t)uniform->sampler_location);
+		}
+		else
+			GX2SetPixelTexture(&texture->gx2, (uint32_t)uniform->sampler_location);
 		GX2SetPixelSampler(&made, (uint32_t)uniform->sampler_location);
 		if (parameters->wrap_s == GL_CLAMP_TO_BORDER || parameters->wrap_t == GL_CLAMP_TO_BORDER ||
 			parameters->wrap_r == GL_CLAMP_TO_BORDER)
@@ -3296,6 +3445,122 @@ static void APIENTRY wiiu_glClear(GLbitfield mask)
 		targets_written();
 }
 
+
+/* Bring-up (cube_probe): which texel of which face a cube map's lookup
+reads. A 4x4 cube whose texels say their face (red: 40 a face, from 40)
+and place (green: column, blue: row, 30 + 60 each), sampled in 24
+directions (each face's major axis, the other two at -0.5 and 0.5) into a
+row of pixels that are read back and logged, to compare with OpenGL's
+rule (the specification's table of the major axis' sc and tc). */
+static const char probe_pixel_source[] =
+	"#version 450 core\n"
+	"uniform samplerCube tex0;\n"
+	"uniform vec4 probe_direction;\n"
+	"layout(location = 0) out vec4 probe_color;\n"
+	"void main()\n"
+	"{\n"
+	"\tprobe_color = texture(tex0, probe_direction.xyz);\n"
+	"\tif (probe_direction.w > 0.5) probe_color = vec4(probe_direction.xyz * 0.25 + 0.5, 1.0);\n"
+	"}\n";
+
+static void cube_probe_run(void)
+{
+	struct texture *cube = calloc(1, sizeof(*cube)), *row = calloc(1, sizeof(*row));
+	struct shader *pixel;
+	GX2ColorBuffer *buffer;
+	GX2Sampler sampler;
+	unsigned char texels[4 * 4 * 4];
+	int face, probe, sampler_location = 0, direction_offset = 0;
+	unsigned long pitch, slice;
+	const unsigned char *read;
+
+	if (!cube || !row)
+		return;
+	texture_defaults(cube);
+	texture_defaults(row);
+	pixel = internal_shader(GL_FRAGMENT_SHADER, probe_pixel_source);
+	if (!pixel || !texture_allocate(cube, GL_TEXTURE_CUBE_MAP, GL_RGBA8, 4, 4, 1) ||
+		!texture_allocate(row, GL_TEXTURE_2D, GL_RGBA8, 48, 1, 1))
+	{
+		wiiu_log("gl: cube probe: not made");
+		return;
+	}
+	if (pixel->pixel->samplerVarCount)
+		sampler_location = (int)pixel->pixel->samplerVars[0].location;
+	if (pixel->pixel->uniformVarCount)
+		direction_offset = (int)pixel->pixel->uniformVars[0].offset;
+	for (face = 0; face < 6; face++)
+	{
+		int x, y;
+
+		for (y = 0; y < 4; y++)
+		{
+			for (x = 0; x < 4; x++)
+			{
+				unsigned char *texel = texels + (y * 4 + x) * 4;
+
+				texel[0] = (unsigned char)(40 * (face + 1));
+				texel[1] = (unsigned char)(30 + 60 * x);
+				texel[2] = (unsigned char)(30 + 60 * y);
+				texel[3] = 255;
+			}
+		}
+		texture_upload(cube, GL_TEXTURE_CUBE_MAP_POSITIVE_X + (GLenum)face, 0, 0, 0, 0, 4, 4, 1, texels, GL_RGBA);
+	}
+	buffer = texture_color_buffer(row, 0);
+	if (!buffer)
+		return;
+	GX2SetColorBuffer(buffer, GX2_RENDER_TARGET_0);
+	gl.bound_color = buffer;
+	GX2InitSampler(&sampler, GX2_TEX_CLAMP_MODE_CLAMP, GX2_TEX_XY_FILTER_MODE_POINT);
+	GX2InitSamplerLOD(&sampler, 0.0f, 0.0f, 0.0f);
+	if (pixel->cube_arrays)
+	{
+		cube->array_view = cube->gx2;
+		cube->array_view.surface.dim = GX2_SURFACE_DIM_TEXTURE_2D_ARRAY;
+		cube->array_view.viewNumSlices = 6;
+		GX2InitTextureRegs(&cube->array_view);
+		GX2SetPixelTexture(&cube->array_view, (uint32_t)sampler_location);
+	}
+	else
+		GX2SetPixelTexture(&cube->gx2, (uint32_t)sampler_location);
+	GX2SetPixelSampler(&sampler, (uint32_t)sampler_location);
+	for (probe = 0; probe < 48; probe++)
+	{
+		float direction[4] = { 0.0f, 0.0f, 0.0f, probe >= 24 ? 1.0f : 0.0f };
+		int major = ((probe % 24) / 4) / 2, sign = ((probe % 24) / 4) & 1 ? -1 : 1;
+		float u = (probe & 1) ? 0.5f : -0.5f, v = (probe & 2) ? 0.5f : -0.5f;
+		int minor0 = major == 0 ? 1 : 0, minor1 = major == 2 ? 1 : 2;
+
+		direction[major] = (float)sign;
+		direction[minor0] = u;
+		direction[minor1] = v;
+		quad_state(48, 1, GX2_CHANNEL_MASK_RGBA);
+		GX2SetViewport((float)probe, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f);
+		GX2SetScissor((uint32_t)probe, 0, 1, 1);
+		GX2SetPixelUniformReg((uint32_t)direction_offset, 4, (uint32_t *)direction);
+		quad_draw(pixel, -1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f);
+	}
+	GX2Invalidate(GX2_INVALIDATE_MODE_COLOR_BUFFER, row->memory, row->bytes);
+	GX2DrawDone();
+	DCInvalidateRange(row->memory, row->bytes);
+	read = texture_level(row, 0, &pitch, &slice);
+	for (probe = 0; probe < 24; probe++)
+	{
+		const unsigned char *texel = read + probe * 4;
+		int major = (probe / 4) / 2, sign = (probe / 4) & 1 ? -1 : 1;
+		float u = (probe & 1) ? 0.5f : -0.5f, v = (probe & 2) ? 0.5f : -0.5f;
+
+		const unsigned char *check = read + (probe + 24) * 4;
+
+		wiiu_log("gl: cube probe %c%c, minor %+.1f %+.1f: face %d, column %d, row %d (direction seen %02x %02x %02x)",
+			sign > 0 ? '+' : '-', "XYZ"[major], u, v, texel[0] / 40 - 1, (texel[1] - 30) / 60, (texel[2] - 30) / 60,
+			check[0], check[1], check[2]);
+	}
+	gl.bound_color = NULL;
+	gl.uploaded_program = 0;
+}
+
 /* the read framebuffer's color into the draw framebuffer, as a textured
 quad (to the screen for 0, whose rows GL counts from the bottom) */
 static void APIENTRY wiiu_glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0,
@@ -3326,6 +3591,12 @@ static void APIENTRY wiiu_glBlitFramebuffer(GLint sx0, GLint sy0, GLint sx1, GLi
 	{
 		/* (the screens are the renderer's from now on: wiiu_video_idle) */
 		gl.drawing = 1;
+		debug_load();
+		if (debug.cube_probe)
+		{
+			cube_probe_run();
+			bind_targets();
+		}
 		wiiu_log("gl: the game's first picture presented (frame %lu, %lu draws)", gl.frame, gl.draws);
 	}
 	if (!gl.draw_framebuffer)
