@@ -1,0 +1,74 @@
+name: Release
+
+# A Wii U test build for a pushed tag: test-<date> (git tag test-20261022 &&
+# git push origin test-20261022) or v<number>. The port is built by build.yml
+# (devkitPro's devkitPPC image) and published as a GitHub release marked
+# pre-release, titled "Wii U test build", with the zip of the SD card's folder
+# (wiiu/apps/halo.wuhb and wiiu/apps/halo/halo.rpx), its SHA-256, and notes
+# from .github/release-notes.md. No game files are ever in it. A manual run
+# builds and releases nothing.
+on:
+  push:
+    tags:
+      - 'test-*'
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: warthog-wiiu-*
+          path: card
+
+      - name: Package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir release
+          zip_name="chupathingy-wiiu-$TAG.zip"
+          folder="$(ls -d card/*/ | head -1)"
+          if [ ! -f "$folder/wiiu/apps/halo.wuhb" ] || [ ! -f "$folder/wiiu/apps/halo/halo.rpx" ]; then
+            echo "::error::the card's folder is missing halo.wuhb or halo.rpx"
+            exit 1
+          fi
+          if find "$folder" -path '*/maps/*' | grep -q .; then
+            echo "::error::a maps folder is in the package; game files are never released"
+            exit 1
+          fi
+          (cd "$folder" && zip -qr "$GITHUB_WORKSPACE/release/$zip_name" wiiu)
+          (cd release && sha256sum "$zip_name" > "$zip_name.sha256")
+          cat "release/$zip_name.sha256"
+
+      - name: Publish
+        env:
+          TAG: ${{ github.ref_name }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        run: |
+          zip_name="chupathingy-wiiu-$TAG.zip"
+          sum="$(cut -d' ' -f1 "release/$zip_name.sha256")"
+          sed -e "s|@ZIP@|$zip_name|g" -e "s|@SHA256@|$sum|g" -e "s|@COMMIT_URL@|$COMMIT_URL|g" \
+            .github/release-notes.md > notes.md
+          gh release create "$TAG" "release/$zip_name" "release/$zip_name.sha256" \
+            --target "$GITHUB_SHA" --prerelease --title "Wii U test build" --notes-file notes.md
