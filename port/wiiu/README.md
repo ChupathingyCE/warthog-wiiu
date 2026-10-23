@@ -1,8 +1,9 @@
 # Wii U
 
-Being brought up: `ninja wiiu` compiles and links the whole game for the
-Wii U (`build/wiiu/halo.rpx`). It has no renderer yet. STATUS.md has
-what works, what does not, and the next step.
+`ninja wiiu` compiles and links the whole game for the Wii U
+(`build/wiiu/halo.rpx`). It plays on hardware and joins servers online; the
+repository's README has the public test build and its known issues, and
+STATUS.md the bring-up log.
 
 ## Requirements
 
@@ -28,6 +29,4 @@ list is the Multiplayer menu's ONLINE GAMES, which joins a game through
 internet play's tunnel, as on the original Xbox and the Xbox 360. The
 checklist: docs/hardware-test.md.
 
-## Plan
-
-Big-endian, like the Xbox 360: the same byte-order and alignment work comes first. `--wuhb` bundles the stub only, never the maps.
+`--wuhb` bundles the game only, never the maps.

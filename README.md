@@ -9,10 +9,38 @@
 
 ## Status
 
-Scaffolding only. This is not playable, and it has not run on hardware.
-`ninja wiiu` builds a stub that logs a line and exits; none of the game is
-compiled for this console yet. We are looking for a porter: if you know the
-Wii U homebrew toolchain and want to help, say so on the Discord.
+**Public test build.** Chupathingy plays on a Wii U: the menus, offline
+multiplayer maps, and online games through Online Games, with the [C] Warthog
+servers and community servers. It is early and has had little time on real
+consoles. Get it from the
+[test-20261022 release](https://github.com/ChupathingyCE/warthog-wiiu/releases/tag/test-20261022).
+
+## Install
+
+1. You need a Wii U running [Aroma](https://aroma.foryour.cafe/).
+2. Download `chupathingy-wiiu-test-20261022.zip` from the release, unpack it,
+   and copy its `wiiu` folder to the root of your SD card, so you end up with
+   `wiiu/apps/halo.wuhb` and `wiiu/apps/halo/halo.rpx`.
+3. Copy the maps from your own copy of Halo (the NTSC maps, 01.10.12.2276)
+   into `wiiu/apps/halo/maps` on the SD card. The build has no game files, and
+   we never share them.
+4. Start Chupathingy from the Wii U Menu. The GamePad and the Pro Controller
+   work: A accepts, B goes back.
+
+## Known issues
+
+- Online matches run at about 15 fps (frame pacing); this is being worked on.
+- The campaign has not been tested yet.
+- No movies: they are skipped.
+- Games on older OpenCE versions show "not accepting players".
+- The picture is slightly inset from the edges of the TV.
+- On some capture cards the TV picture may not fit until you press HOME once;
+  regular TVs are fine.
+
+## Reporting problems
+
+Tell us in #wii-u on the [Discord](https://discord.gg/chupathingy). Say what
+you were doing, and attach `wiiu/apps/halo/logs/debug.txt` and `port.txt`.
 
 ## What is here
 
@@ -23,8 +51,7 @@ Wii U homebrew toolchain and want to help, say so on the Discord.
 - `tools/wiiu_package.py`: lays out the build for an SD card (Aroma, at
   `sd:/wiiu/apps/halo/`) or for Cemu.
 
-The Wii U is big-endian, like the Xbox 360, so byte-order and alignment work
-comes first.
+The Wii U is big-endian, like the Xbox 360.
 
 ## Building
 
