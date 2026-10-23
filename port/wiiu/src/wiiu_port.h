@@ -14,6 +14,9 @@ Cemu's log, udplogserver on a console) */
 void wiiu_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void wiiu_log_v(const char *format, va_list arguments);
 void wiiu_log_flush(void);
+/* the time spent writing the log's lines to the SD card since the start,
+in OSTime ticks (the renderer's frame lines) */
+long long wiiu_log_write_ticks(void);
 
 /* the log on the TV and the GamePad until the renderer starts
 (wiiu_screen.c) */
@@ -69,6 +72,14 @@ void wiiu_exit_threads(const char *when);
 int wiiu_proc_update(void);
 void wiiu_proc_request_quit(void);
 void wiiu_proc_poll(void);
+
+/* the network (wiiu_net.c): up as Butter and Jelly brings it up, once;
+nonzero if it is */
+int wiiu_network_start(void);
+
+/* the start-up's network self-test and the console game list, on a thread
+of their own (wiiu_online.c, wiiu_game_list.h) */
+void wiiu_online_start(void);
 
 /* the controllers (wiiu_pad.c): the GamePad, then the Wii Remotes' Pro and
 Classic Controllers, in the game's four ports, as the Xbox's gamepad state

@@ -16,8 +16,10 @@ clicks the thumb buttons. The triggers and the face buttons are digital on
 these controllers: fully pressed or not.
 */
 
+#include <stdio.h>
 #include <string.h>
 
+#include <coreinit/time.h>
 #include <padscore/kpad.h>
 #include <padscore/wpad.h>
 #include <vpad/input.h>
@@ -36,8 +38,9 @@ these controllers: fully pressed or not.
 enum { ANALOG_A, ANALOG_B, ANALOG_X, ANALOG_Y, ANALOG_BLACK, ANALOG_WHITE, ANALOG_LEFT_TRIGGER, ANALOG_RIGHT_TRIGGER };
 
 /* the buttons of each kind of controller, in the order: up, down, left,
-right, +, -, left stick, right stick, then A, B, X, Y (by place: bottom,
-right, left, top), black (R), white (L), left trigger (ZL), right (ZR) */
+right, +, -, left stick, right stick, then A, B, X, Y (by their labels, as
+the Wii U's own menus use them: A accepts, B backs out), black (R), white
+(L), left trigger (ZL), right (ZR) */
 struct layout
 {
 	unsigned int dpad[4], start, back, thumbs[2];
@@ -48,7 +51,7 @@ static const struct layout gamepad_layout =
 {
 	{ VPAD_BUTTON_UP, VPAD_BUTTON_DOWN, VPAD_BUTTON_LEFT, VPAD_BUTTON_RIGHT },
 	VPAD_BUTTON_PLUS, VPAD_BUTTON_MINUS, { VPAD_BUTTON_STICK_L, VPAD_BUTTON_STICK_R },
-	{ VPAD_BUTTON_B, VPAD_BUTTON_A, VPAD_BUTTON_Y, VPAD_BUTTON_X, VPAD_BUTTON_R, VPAD_BUTTON_L,
+	{ VPAD_BUTTON_A, VPAD_BUTTON_B, VPAD_BUTTON_X, VPAD_BUTTON_Y, VPAD_BUTTON_R, VPAD_BUTTON_L,
 	  VPAD_BUTTON_ZL, VPAD_BUTTON_ZR },
 };
 
@@ -56,7 +59,7 @@ static const struct layout pro_layout =
 {
 	{ WPAD_PRO_BUTTON_UP, WPAD_PRO_BUTTON_DOWN, WPAD_PRO_BUTTON_LEFT, WPAD_PRO_BUTTON_RIGHT },
 	WPAD_PRO_BUTTON_PLUS, WPAD_PRO_BUTTON_MINUS, { WPAD_PRO_BUTTON_STICK_L, WPAD_PRO_BUTTON_STICK_R },
-	{ WPAD_PRO_BUTTON_B, WPAD_PRO_BUTTON_A, WPAD_PRO_BUTTON_Y, WPAD_PRO_BUTTON_X, WPAD_PRO_TRIGGER_R,
+	{ WPAD_PRO_BUTTON_A, WPAD_PRO_BUTTON_B, WPAD_PRO_BUTTON_X, WPAD_PRO_BUTTON_Y, WPAD_PRO_TRIGGER_R,
 	  WPAD_PRO_TRIGGER_L, WPAD_PRO_TRIGGER_ZL, WPAD_PRO_TRIGGER_ZR },
 };
 
@@ -64,7 +67,7 @@ static const struct layout classic_layout =
 {
 	{ WPAD_CLASSIC_BUTTON_UP, WPAD_CLASSIC_BUTTON_DOWN, WPAD_CLASSIC_BUTTON_LEFT, WPAD_CLASSIC_BUTTON_RIGHT },
 	WPAD_CLASSIC_BUTTON_PLUS, WPAD_CLASSIC_BUTTON_MINUS, { 0, 0 },
-	{ WPAD_CLASSIC_BUTTON_B, WPAD_CLASSIC_BUTTON_A, WPAD_CLASSIC_BUTTON_Y, WPAD_CLASSIC_BUTTON_X,
+	{ WPAD_CLASSIC_BUTTON_A, WPAD_CLASSIC_BUTTON_B, WPAD_CLASSIC_BUTTON_X, WPAD_CLASSIC_BUTTON_Y,
 	  WPAD_CLASSIC_BUTTON_R, WPAD_CLASSIC_BUTTON_L, WPAD_CLASSIC_BUTTON_ZL, WPAD_CLASSIC_BUTTON_ZR },
 };
 
@@ -138,18 +141,115 @@ static int free_port(void)
 	return -1;
 }
 
+/* ---------- buttons from a file, for unattended runs in Cemu
+
+Only when pad-test.txt is in the game's folder at the start (as gl.txt's
+switches): then pad-command.txt, when it appears, is read and removed, and
+its buttons pressed on the GamePad one after another (each held 150 ms,
+then 150 ms up): A B X Y, U D L R (the d-pad), + and -. A test machine
+drives the game with it while its desktop is in use. Never on a console's
+card (docs/hardware-test.md). */
+
+#define TEST_FOLDER "fs:/vol/external01/wiiu/apps/halo/"
+#define TEST_STEP_MS 300
+#define TEST_CHECK_MS 500
+
+static int test_input = 0;
+static OSTime test_checked, test_step_time;
+static char test_buttons[64];
+static int test_count, test_index;
+
+static unsigned int test_button(char letter)
+{
+	switch (letter)
+	{
+	case 'A': return VPAD_BUTTON_A;
+	case 'B': return VPAD_BUTTON_B;
+	case 'X': return VPAD_BUTTON_X;
+	case 'Y': return VPAD_BUTTON_Y;
+	case 'U': return VPAD_BUTTON_UP;
+	case 'D': return VPAD_BUTTON_DOWN;
+	case 'L': return VPAD_BUTTON_LEFT;
+	case 'R': return VPAD_BUTTON_RIGHT;
+	case '+': return VPAD_BUTTON_PLUS;
+	case '-': return VPAD_BUTTON_MINUS;
+	default: return 0;
+	}
+}
+
+/* the buttons the file holds down now (0 when the file switch is off) */
+static unsigned int test_hold(void)
+{
+	OSTime now = OSGetSystemTime();
+
+	if (!test_input)
+	{
+		FILE *file = fopen(TEST_FOLDER "pad-test.txt", "rb");
+
+		test_input = file ? 1 : -1;
+		if (file)
+		{
+			fclose(file);
+			wiiu_log("input: pad-test.txt: GamePad buttons from pad-command.txt as well (unattended runs in Cemu)");
+		}
+	}
+	if (test_input < 0)
+		return 0;
+	if (test_index >= test_count && OSTicksToMilliseconds(now - test_checked) >= TEST_CHECK_MS)
+	{
+		FILE *file = fopen(TEST_FOLDER "pad-command.txt", "rb");
+
+		test_checked = now;
+		if (file)
+		{
+			char text[64];
+			size_t size = fread(text, 1, sizeof(text) - 1, file), index;
+
+			fclose(file);
+			remove(TEST_FOLDER "pad-command.txt");
+			test_count = 0;
+			for (index = 0; index < size; index++)
+			{
+				if (test_button(text[index]))
+					test_buttons[test_count++] = text[index];
+			}
+			test_buttons[test_count] = 0;
+			test_index = 0;
+			test_step_time = now;
+			wiiu_log("input: pad-command.txt: %s", test_count ? test_buttons : "(no buttons)");
+		}
+	}
+	if (test_index >= test_count)
+		return 0;
+	if (OSTicksToMilliseconds(now - test_step_time) >= TEST_STEP_MS)
+	{
+		test_index++;
+		test_step_time = now;
+		if (test_index >= test_count)
+			return 0;
+	}
+	return OSTicksToMilliseconds(now - test_step_time) < TEST_STEP_MS / 2 ? test_button(test_buttons[test_index]) : 0;
+}
+
 void wiiu_pad_update(void)
 {
 	VPADStatus gamepad;
 	VPADReadError gamepad_error = VPAD_READ_SUCCESS;
+	unsigned int extra;
 	int channel;
 
 	pads_initialize();
+	extra = test_hold();
 	memset(&gamepad, 0, sizeof(gamepad));
 	if (VPADRead(VPAD_CHAN_0, &gamepad, 1, &gamepad_error) > 0 && gamepad_error == VPAD_READ_SUCCESS)
 	{
-		fill(&states[0], &gamepad_layout, gamepad.hold, gamepad.leftStick.x, gamepad.leftStick.y,
+		fill(&states[0], &gamepad_layout, gamepad.hold | extra, gamepad.leftStick.x, gamepad.leftStick.y,
 			gamepad.rightStick.x, gamepad.rightStick.y);
+	}
+	else if (test_input > 0)
+	{
+		/* (Cemu with no GamePad: the file's buttons alone) */
+		fill(&states[0], &gamepad_layout, extra, 0.0f, 0.0f, 0.0f, 0.0f);
 	}
 	else if (gamepad_error != VPAD_READ_NO_SAMPLES)
 	{

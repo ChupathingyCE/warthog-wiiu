@@ -6,9 +6,8 @@ the system's events (ProcUI: the HOME button menu, leaving the game) and
 what a desktop's window has that a console does not (a mouse, a keyboard, a
 clipboard, links to open).
 
-The screen is the TV's, 1280x720, drawn by the renderer
-(port/wiiu/src/wiiu_video.c) once it is up; until it is, the game runs
-without a picture, as the dedicated server does (d3d8_gl.c draws nothing).
+The screen is the TV's, 1280x720, drawn by the game's renderer through the
+port's OpenGL on GX2 (port/wiiu/src/wiiu_gl.c and wiiu_video.c).
 */
 
 #include "platform.h"
@@ -79,11 +78,27 @@ int platform_window_sizes(long *widths, long *heights, int maximum)
 	return 0;
 }
 
+/* gl_functions.c's */
+int gl_functions_load(void);
+
+/* the screen: GX2 (wiiu_video.c), under the desktop renderer's OpenGL
+(wiiu_gl.c), as the Xbox 360's xbox360_platform.c starts its own */
 BOOL platform_video_initialize(unsigned long width, unsigned long height)
 {
-	(void)width;
-	(void)height;
-	return wiiu_video_initialize();
+	static BOOL ready;
+
+	if (ready)
+		return TRUE;
+	if (!wiiu_video_initialize())
+		return FALSE;
+	if (!gl_functions_load())
+	{
+		platform_log("video: an OpenGL entry point is missing");
+		return FALSE;
+	}
+	platform_log("video: the game's %lux%lu screen, drawn through OpenGL on GX2", width, height);
+	ready = TRUE;
+	return TRUE;
 }
 
 void platform_display_apply(void)

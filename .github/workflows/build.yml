@@ -1,0 +1,106 @@
+name: Build
+
+# Builds the Wii U port in devkitPro's official devkitPPC container, for every
+# push to main, every pull request and by hand, and keeps the SD card's
+# folder (tools/wiiu_package.py: wiiu/apps/halo.wuhb and
+# wiiu/apps/halo/halo.rpx) as the run's artifact. No secrets are used, and no
+# game files: the maps come from the player's own disc and are never packaged.
+# The release workflow (release.yml) calls this one for a tag.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  wiiu:
+    runs-on: ubuntu-24.04
+    container: devkitpro/devkitppc:latest
+    timeout-minutes: 60
+    env:
+      DEVKITPRO: /opt/devkitpro
+      DEVKITPPC: /opt/devkitpro/devkitPPC
+      # CafeGLSL (MIT), the GLSL compiler linked into the game, from its own
+      # release; the checksum is of the archive, so a changed file fails here
+      CAFEGLSL_URL: https://github.com/Exzap/CafeGLSL/releases/download/v1.0.0-rc1/cafeglsl-1.0.0-rc1-wiiu-ppc.tar.xz
+      CAFEGLSL_SHA256: 4c18928e9f0c56d041352d6b676c8bdd5b9f89a9c0f61b25fa56207a45aec0fc
+    steps:
+      - name: Install the build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 ninja-build ccache git zip unzip curl xz-utils ca-certificates
+
+      # Prove the image has what the build links against, and say which is
+      # missing if it does not. Better a clear message now than a link error
+      # later that reads like a build problem.
+      - name: Check the toolchain
+        run: |
+          ls /opt/devkitpro
+          for file in \
+            "$DEVKITPPC/bin/powerpc-eabi-gcc" \
+            /opt/devkitpro/wut/share/wut.specs \
+            /opt/devkitpro/tools/bin/elf2rpl \
+            /opt/devkitpro/tools/bin/wuhbtool; do
+            if [ -e "$file" ]; then
+              echo "found $file"
+            else
+              echo "::error::$file is not in the image; the build needs it"
+            fi
+          done
+
+      - name: Install CafeGLSL
+        run: |
+          curl -fsSL -o cafeglsl.tar.xz "$CAFEGLSL_URL"
+          echo "$CAFEGLSL_SHA256  cafeglsl.tar.xz" | sha256sum -c -
+          mkdir /opt/cafeglsl
+          tar -xJf cafeglsl.tar.xz -C /opt/cafeglsl --strip-components=1
+          rm cafeglsl.tar.xz
+          ls /opt/cafeglsl/lib /opt/cafeglsl/include
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: true
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .ccache
+          key: ccache-wiiu-${{ github.sha }}
+          restore-keys: ccache-wiiu-
+
+      - name: Configure
+        run: python3 chupathingyce/configure.py --console-port port/wiiu --cafeglsl /opt/cafeglsl --compiler-launcher ccache
+
+      - name: Build
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_MAXSIZE: 2G
+        run: |
+          ninja wiiu
+          ccache --show-stats
+
+      # the card's folder, as a player installs it (without maps)
+      - name: Package
+        run: |
+          python3 tools/wiiu_package.py --out package
+          find package -type f -exec ls -l {} +
+          if find package -path '*/maps/*' | grep -q .; then
+            echo "::error::a maps folder is in the package; game files are never packaged"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: warthog-wiiu-${{ github.sha }}
+          path: package
+          if-no-files-found: error
+          retention-days: 7

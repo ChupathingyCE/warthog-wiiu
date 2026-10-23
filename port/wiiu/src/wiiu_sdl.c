@@ -11,6 +11,8 @@ Each behaves as SDL 3's does for what those units ask of it.
 
 #include <SDL3/SDL.h>
 
+#include <coreinit/time.h>
+
 #include <dirent.h>
 #include <errno.h>
 #include <fnmatch.h>
@@ -230,6 +232,13 @@ char **SDL_GlobDirectory(const char *path, const char *pattern, SDL_GlobFlags fl
 	return names;
 }
 
+/* ---------- time */
+
+Uint64 SDL_GetTicks(void)
+{
+	return (Uint64)OSTicksToMilliseconds(OSGetSystemTime());
+}
+
 /* ---------- OpenGL: the port's (wiiu_gl.c) */
 
 SDL_FunctionPointer SDL_GL_GetProcAddress(const char *name)
@@ -264,6 +273,26 @@ const char *SDL_GetAudioDeviceName(SDL_AudioDeviceID device)
 {
 	(void)device;
 	return "Wii U";
+}
+
+/* the one output: the mixer's float stereo (SDL_OpenAudioDeviceStream) */
+bool SDL_GetAudioDeviceFormat(SDL_AudioDeviceID device, SDL_AudioSpec *specification, int *sample_frames)
+{
+	(void)device;
+	if (specification)
+	{
+		specification->format = SDL_AUDIO_F32;
+		specification->channels = 2;
+		specification->freq = 48000;
+	}
+	if (sample_frames)
+		*sample_frames = 0;
+	return true;
+}
+
+SDL_AudioDeviceID SDL_GetAudioStreamDevice(SDL_AudioStream *stream)
+{
+	return stream ? SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK : 0;
 }
 
 struct SDL_AudioStream

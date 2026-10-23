@@ -63,6 +63,10 @@ TARGET_FLAGS = [
     "-DHALO_CONSOLE",
     "-DHALO_WIIU_CONSOLE",
     "-DHALO_BIG_ENDIAN",
+    # the menus' map list and the Xbox map packs (maps_<pack>: Halo CE+), as
+    # the original Xbox, the Xbox 360 and the desktop builds have them (the
+    # game's port/linux/game/ui_map_list.c, map_packs.c)
+    "-DHALO_MAP_LIST",
     "-O2",
     "-g",
     # (no temporary assembly files: the generated HUD source is large)
@@ -108,6 +112,9 @@ PLATFORM_FLAGS = [
     "-std=gnu11",
     "-D_GNU_SOURCE",
     "-DHALO_LINUX_PLATFORM_LAYER",
+    # internet play's tunnel logs what becomes of the host's datagrams for
+    # the game (p2p.c; the log is src/wiiu_net.c's, as the original Xbox's)
+    "-DP2P_TRACE_DATAGRAMS",
     "-Wall",
     "-Wno-unused-function",
     "-Wno-unknown-pragmas",
@@ -237,6 +244,14 @@ def add_arguments(parser: Any) -> None:
         help="CafeGLSL's Wii U library (the release's wiiu-ppc folder, or the "
              "portlib in /opt/devkitpro/portlibs/wiiu): the renderer's shader "
              "compiler (port/wiiu/docs/renderer.md); without it, no shaders",
+    )
+
+
+    parser.add_argument(
+        "--wiiu-gl-switches",
+        action="store_true",
+        help="the Wii U renderer's bring-up switches, read from gl.txt beside "
+             "halo.rpx (src/wiiu_gl.c); a normal build never reads the file",
     )
 
 
@@ -394,6 +409,10 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
     # HALO_BIG_ENDIAN)
     for source in sorted((game / CONSOLE_GAME).glob("*.c")):
         add_object(source, f"{game_cflags} -I{_quote(game / CONSOLE_INCLUDE)}", [semantics_header])
+    # the port's own game units: the Multiplayer menu's ONLINE GAMES
+    # (HALO_CONSOLE_ONLINE_GAMES), in the game's terms
+    for source in sorted((port_dir / "game").glob("*.c")):
+        add_object(source, game_cflags, [semantics_header])
 
     platform_cflags = " ".join([
         abi,
@@ -453,6 +472,7 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
         target,
         *defines,
         *([f"-DHALO_WIIU_CAFEGLSL -isystem {_quote(cafeglsl / 'include')}"] if cafeglsl else []),
+        *(["-DHALO_WIIU_GL_SWITCHES"] if getattr(sln.args, "wiiu_gl_switches", False) else []),
         " ".join(CONSOLE_FLAGS),
         version_define,
         f"-iquote {_quote(game)}",
