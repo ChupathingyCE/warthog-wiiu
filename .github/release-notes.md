@@ -16,15 +16,23 @@ your own copy of Halo (the NTSC maps, 01.10.12.2276) into
 
 ## What works
 
-- The menus
-- Blood Gulch
-- The online game list
+- Boot and the menus, at 60 fps
+- Blood Gulch and the multiplayer maps offline, at 30 fps
+- Online play through Online Games: the [C] Warthog servers and community
+  servers
+- HOME and Close from the HOME Menu
+- Sound
+- The GamePad and the Pro Controller: A to accept, B to go back
 
 ## Known issues
 
-- This is a test build: expect crashes, missing graphics and slow frame rates.
-- Other maps and modes are untested.
-- Online play is new, and joining some games may fail.
+- Online matches run at about 15 fps (frame pacing); this is being worked on.
+- The campaign has not been tested yet.
+- Games on older OpenCE versions show "not accepting players".
+- No movies: they are skipped.
+- The picture is slightly inset from the edges of the TV.
+- On some capture cards the TV picture may not fit until you press HOME once;
+  regular TVs are fine.
 
 ## Report problems
 
