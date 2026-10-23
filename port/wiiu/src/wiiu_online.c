@@ -288,6 +288,69 @@ static int udp_echo_to(unsigned long address, unsigned long *milliseconds, const
 	return count == (int)sizeof(probe) && !memcmp(reply, probe, sizeof(probe));
 }
 
+/* ---------- a datagram socket's longest receive
+
+The console refused internet play's tunnel's 2048-byte receives with
+EMSGSIZE whatever the datagram's size (wiiu_net.c, "a datagram socket's
+receive length"). A datagram to the loopback, then nsysnet's own recvfrom
+asked with shorter and shorter lengths: the lengths refused, the first
+taken, and whether the datagram was still there after a refusal. */
+
+static void receive_length_test(void)
+{
+	static const int lengths[] = { 4096, 2048, 1500, 1472, 1400, 1280, 1200, 512 };
+	static char data[4096];
+	static const char probe[] = "warthog wiiu length";
+	struct sockaddr_in local, from;
+	int length = sizeof(local), handle, index;
+	char refused[96] = "";
+	size_t used = 0;
+
+	handle = posix_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (handle < 0)
+		return;
+	memset(&local, 0, sizeof(local));
+	local.sin_family = AF_INET;
+	local.sin_addr.s_addr = htonl(0x7F000001UL);
+	if (posix_socket_bind(handle, &local, sizeof(local)) != 0 ||
+		posix_socket_getsockname(handle, &local, &length) != 0 || posix_socket_set_nonblocking(handle, 1) != 0 ||
+		posix_socket_sendto(handle, probe, sizeof(probe), 0, &local, sizeof(local)) != (int)sizeof(probe) ||
+		!wait_ready(handle, 0, now_ms() + ECHO_WAIT))
+	{
+		wiiu_log("net test: receive lengths: the loopback datagram did not come; not tested");
+		posix_socket_close(handle);
+		return;
+	}
+	for (index = 0; index < (int)(sizeof(lengths) / sizeof(*lengths)); index++)
+	{
+		socklen_t from_length = sizeof(from);
+		int result = (int)recvfrom(handle, data, (size_t)lengths[index], 0, (struct sockaddr *)&from, &from_length);
+		int error = errno;
+
+		if (result >= 0)
+		{
+			wiiu_log("net test: receive lengths: %d taken (%d bytes came)%s%s%s", lengths[index], result,
+				used ? "; refused: " : "", refused, used ? " (the datagram stayed for the next)" : "");
+			posix_socket_close(handle);
+			return;
+		}
+		if (error == EAGAIN)
+		{
+			wiiu_log("net test: receive lengths: %d taken but the datagram was gone%s%s", lengths[index],
+				used ? "; refused: " : "", refused);
+			posix_socket_close(handle);
+			return;
+		}
+		if (used < sizeof(refused) - 24)
+		{
+			used += (size_t)snprintf(refused + used, sizeof(refused) - used, "%s%d (errno %d, nsysnet %d)",
+				used ? ", " : "", lengths[index], error, RPLWRAP(socketlasterr)());
+		}
+	}
+	wiiu_log("net test: receive lengths: none taken; refused: %s", refused);
+	posix_socket_close(handle);
+}
+
 /* ---------- UDP out to the internet: a STUN binding request (RFC 5389)
 
 Internet play's tunnel is a UDP socket that reaches public addresses: STUN
@@ -576,6 +639,7 @@ static void self_test(void)
 		wiiu_log("net test: UDP to the loopback came back (%lu ms)", milliseconds);
 	else
 		wiiu_log("net test: UDP to the loopback FAILED: %s", failure);
+	receive_length_test();
 	stun_tests();
 }
 

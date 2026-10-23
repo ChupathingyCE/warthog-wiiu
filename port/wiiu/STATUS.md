@@ -432,3 +432,22 @@ being played, so it left after the settings record, as it should).
 **Next.** The console's run: the three STUN lines and the tunnel socket's
 `net:` lines say which way of making a UDP socket reaches the internet
 from the Wii U, and the next build makes the tunnel that way.
+
+## Online on the console: the second run (2026-10-22)
+
+The socket log found both. The 10022 is the game's 1 MB SO_SNDBUF and
+SO_RCVBUF (refused, nsysnet 11; the console's own sizes are 1492 and 4096
+bytes). And UDP reaches the internet from every kind of socket (all three
+STUN tests answered), but every receive on internet play's tunnel failed
+with EMSGSIZE (errno 122, nsysnet 12): the tunnel reads into 2048 bytes,
+and the console refuses a datagram socket's receive that long whatever the
+datagram's size (the game's 1200 and the test's 512 were taken). Every
+answer from the host and the STUN servers was lost.
+
+This build: a receive refused with EMSGSIZE is asked again at once with
+shorter lengths (1472 down to 512), the longest taken kept as the limit
+and logged; buffer sizes step down from the one asked for to the largest
+the console takes (64 KB at most, then 32, 16, 8), logged; and the network
+test tries receive lengths from 4096 down and says which are refused and
+whether a refused receive keeps the datagram. In Cemu it joined
+`[C] Warthog 1` through the tunnel again.
