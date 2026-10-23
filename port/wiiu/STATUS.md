@@ -451,3 +451,21 @@ the console takes (64 KB at most, then 32, 16, 8), logged; and the network
 test tries receive lengths from 4096 down and says which are refused and
 whether a refused receive keeps the datagram. In Cemu it joined
 `[C] Warthog 1` through the tunnel again.
+
+## On the game's main: the first public test build (2026-10-22)
+
+**Works, in Cemu (interpreter).** The game's main (Grifball and Bomb, the
+audio set, the byte order merged as #429 and #431) boots to the main menu,
+skips the movies (no FFmpeg on the console: bink_null.c, as a missing movie
+file) and loads Blood Gulch.
+
+- The submodule is the game's `wiiu-test-build` branch: main with
+  `wiiu-night` (game PRs #411, #418, #421: the console's waits, the thread
+  stop and the GL layer) merged, until those are in main.
+- The map list (`HALO_MAP_LIST`) is built, as on the Xbox and Xbox 360: the
+  game browser and the lobby name their maps by it. The console list still
+  asks without `packs=1`.
+- `wiiu_sdl.c` answers the mixer's newer questions: the output's format
+  (stereo), the stream's device and `SDL_GetTicks`.
+- Cemu's recompiler stops it while the menus are built (a call's saved
+  values read back as zero); run Cemu with `--force-interpreter`.
