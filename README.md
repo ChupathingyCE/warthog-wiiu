@@ -47,7 +47,7 @@ you were doing, and attach `wiiu/apps/halo/logs/debug.txt` and `port.txt`.
 - `chupathingyce/`: the game, a submodule of
   [ChupathingyCE/chupathingyce](https://github.com/ChupathingyCE/chupathingyce).
 - `port/wiiu/`: the Wii U port: `build.py` (the build rules), `include/` (the
-  prefix header), `src/` (the stub), and a README with its requirements.
+  prefix header), `src/` (the console layer), and a README with its requirements.
 - `tools/wiiu_package.py`: lays out the build for an SD card (Aroma, at
   `sd:/wiiu/apps/halo/`) or for Cemu.
 
