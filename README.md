@@ -47,6 +47,24 @@ This is the game's console-port build; see "Console ports" in the game's
 [docs/building.md](https://github.com/ChupathingyCE/chupathingyce/blob/main/docs/building.md).
 If the toolchain is missing, configure says so and stops.
 
+The shader compiler, [CafeGLSL](https://github.com/Exzap/CafeGLSL) (MIT, v1.0.0-rc1
+or later), is linked statically: unpack the release's `wiiu-ppc` archive and
+pass `--cafeglsl DIR`, or put it in `/opt/devkitpro/portlibs/wiiu`.
+
+## CI and test builds
+
+`.github/workflows/build.yml` builds in devkitPro's `devkitpro/devkitppc` image
+for every pull request, every push to main and by hand, and keeps the SD card's
+folder (`wiiu/apps/halo.wuhb`, `wiiu/apps/halo/halo.rpx`) as the run's
+artifact. It downloads CafeGLSL from its release and checks the archive's
+SHA-256; nothing else needs setting up, and no maps are ever packaged.
+
+To put up a test build, push a tag on the commit to build:
+`git tag test-20261022 && git push origin test-20261022` (or `v<number>`).
+`release.yml` builds it and publishes a pre-release, "Wii U test build", with
+the zip of the card's folder, its SHA-256, and the notes in
+`.github/release-notes.md` (edit that file to change what they say).
+
 ## Your own Halo files
 
 Bring your own Halo files. This repository never contains, and we never

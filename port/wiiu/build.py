@@ -63,6 +63,10 @@ TARGET_FLAGS = [
     "-DHALO_CONSOLE",
     "-DHALO_WIIU_CONSOLE",
     "-DHALO_BIG_ENDIAN",
+    # the menus' map list and the Xbox map packs (maps_<pack>: Halo CE+), as
+    # the original Xbox, the Xbox 360 and the desktop builds have them (the
+    # game's port/linux/game/ui_map_list.c, map_packs.c)
+    "-DHALO_MAP_LIST",
     "-O2",
     "-g",
     # (no temporary assembly files: the generated HUD source is large)
