@@ -555,9 +555,82 @@ int posix_socket_sendto(int socket, const void *buffer, int length, int flags,
 	return result;
 }
 
+/* ---------- a datagram socket's receive length
+
+The console refuses a datagram socket's receive whose length is over some
+limit with EMSGSIZE (nsysnet 12), whatever the datagram's own size: on the
+console the game's 1200 bytes and the network test's 512 were taken, and
+internet play's tunnel's 2048 refused on every receive, so the tunnel never
+read the host's answers (port.txt of 2026-10-22, "recvfrom on socket 13
+failed: errno 122 (EMSGSIZE)"). Linux and Windows take any length.
+
+So a receive refused that way is asked again at once with the next shorter
+of these lengths, and the longest taken is the limit from then on, logged
+once. The tunnel's packets are at most 1431 bytes (p2p.c's
+MAXIMUM_PACKET_SIZE), the game's datagrams 1200 (network_connection.h). Every datagram the protocols send fits an Ethernet frame (at
+most 1472 bytes of UDP). A receive refused even at the shortest is
+Winsock's WSAEMSGSIZE: a datagram dropped, as Winsock drops one longer than
+the buffer. */
+
+static const int receive_lengths[] = { 1472, 1440, 1432, 1400, 1280, 1200, 1024, 512 };
+/* the longest length taken; 0 until a receive is refused */
+static int receive_limit;
+
+static int datagram_socket(int socket)
+{
+	struct socket_trace *trace = trace_of(socket);
+
+	return trace ? !trace->stream : 1;
+}
+
+/* one receive: recv when address is NULL, else recvfrom */
+static int receive_once(int socket, void *buffer, int length, int flags, void *address, socklen_t *address_length)
+{
+	if (address)
+		return (int)recvfrom(socket, buffer, (size_t)length, flags, address, address_length);
+	return (int)recv(socket, buffer, (size_t)length, flags);
+}
+
+static int receive(const char *call, int socket, void *buffer, int length, int flags, void *address,
+	int *address_length)
+{
+	socklen_t socket_length = address && address_length ? (socklen_t)*address_length : 0;
+	socklen_t *lengths = address && address_length ? &socket_length : NULL;
+	void *from = address && address_length ? address : NULL;
+	int datagram = datagram_socket(socket);
+	int asked = length, result, step;
+
+	if (datagram && receive_limit && length > receive_limit)
+		length = receive_limit;
+	result = receive_once(socket, buffer, length, flags, from, lengths);
+	for (step = 0; result < 0 && errno == EMSGSIZE && datagram &&
+		step < (int)(sizeof(receive_lengths) / sizeof(*receive_lengths)); step++)
+	{
+		if (receive_lengths[step] >= length)
+			continue;
+		length = receive_lengths[step];
+		if (lengths)
+			socket_length = (socklen_t)*address_length;
+		result = receive_once(socket, buffer, length, flags, from, lengths);
+		if (result >= 0 || errno != EMSGSIZE)
+		{
+			if (!receive_limit || length < receive_limit)
+			{
+				receive_limit = length;
+				wiiu_log("net: a datagram socket's receive of %d bytes refused (EMSGSIZE); receiving at most %d "
+					"from now on", asked, length);
+			}
+			break;
+		}
+	}
+	if (address_length)
+		*address_length = (int)socket_length;
+	return succeed_call(result, call, socket, NULL);
+}
+
 int posix_socket_recv(int socket, void *buffer, int length, int flags)
 {
-	int result = succeed_call((int)recv(socket, buffer, (size_t)length, flags), "recv", socket, NULL);
+	int result = receive("recv", socket, buffer, length, flags, NULL, NULL);
 
 	trace_received(socket, NULL, 0, result);
 	return result;
@@ -566,13 +639,8 @@ int posix_socket_recv(int socket, void *buffer, int length, int flags)
 int posix_socket_recvfrom(int socket, void *buffer, int length, int flags,
 	void *address, int *address_length)
 {
-	socklen_t socket_length = address && address_length ? (socklen_t)*address_length : 0;
-	int result = (int)recvfrom(socket, buffer, (size_t)length, flags, address && address_length ? address : NULL,
-		address && address_length ? &socket_length : NULL);
+	int result = receive("recvfrom", socket, buffer, length, flags, address, address_length);
 
-	if (address_length)
-		*address_length = (int)socket_length;
-	result = succeed_call(result, "recvfrom", socket, NULL);
 	trace_received(socket, address, address_length ? *address_length : 0, result);
 	return result;
 }
@@ -676,25 +744,50 @@ int posix_socket_setsockopt(int socket, int level, int name, const void *value, 
 		host_level, (unsigned)host_name, number, length);
 	if (host_level == SOL_SOCKET && (host_name == SO_SNDBUF || host_name == SO_RCVBUF))
 	{
-		/* the buffers stay the system's own size. The game and internet
-		play's tunnel ask for 1 MB each (transport_endpoint_winsock.c,
-		p2p.c), on every socket: more than all the memory an application
-		can give the console's network for its sockets' buffers (wut's
-		nn/nets2/somemopt.h: 128 KB to 3 MB), and Butter and Jelly asks for
-		256 KB at most (http_curl.cpp, ConfigureSocket). The UDP socket
-		proven on this console (wiiu_online.c's test) has the system's
-		sizes. A size asked for is taken as Linux takes one above its limit:
-		without an error */
-		int current = 0;
+		/* the largest size the console takes, up to the one asked for. The
+		game and internet play's tunnel ask for 1 MB on every socket
+		(transport_endpoint_winsock.c, p2p.c), which the console refuses
+		with EINVAL (nsysnet 11; its own sizes are 1492 bytes to send and
+		4096 to receive: port.txt of 2026-10-22), more than all the memory
+		an application can give its network for its sockets' buffers (wut's
+		nn/nets2/somemopt.h: 128 KB to 3 MB). Butter and Jelly asks for
+		256 KB for its one stream (http_curl.cpp, ConfigureSocket);
+		Moonlight steps a refused size down until one is taken
+		(moonlight-common-c's PlatformSockets.c, bindUdpSocket). The game
+		has several sockets, so 64 KB at most. The socket's first ask is
+		logged with the size taken; none taken keeps the system's, without
+		an error, as Linux takes a size above its limit */
+		static const int sizes[] = { 65536, 32768, 16384, 8192 };
+		int size = number, index, taken = 0, current = 0;
 		socklen_t current_length = sizeof(current);
+		int logged = trace && trace->logged && !(trace->options_logged & (host_name == SO_SNDBUF ? 1 : 2));
 
+		if (trace)
+			trace->options_logged |= (unsigned char)(host_name == SO_SNDBUF ? 1 : 2);
+		for (index = -1; index < (int)(sizeof(sizes) / sizeof(*sizes)) && !taken; index++)
+		{
+			if (index >= 0)
+			{
+				if (sizes[index] >= size)
+					continue;
+				size = sizes[index];
+			}
+			if (size <= 0)
+				break;
+			taken = setsockopt(socket, SOL_SOCKET, host_name, &size, sizeof(size)) == 0;
+		}
 		if (getsockopt(socket, SOL_SOCKET, host_name, &current, &current_length) != 0)
 			current = -1;
-		if (trace && trace->logged && !(trace->options_logged & (host_name == SO_SNDBUF ? 1 : 2)))
+		if (logged && taken)
 		{
-			trace->options_logged |= (unsigned char)(host_name == SO_SNDBUF ? 1 : 2);
-			wiiu_log("net: socket %d: %s %d asked for; the system's own size kept (%d bytes)", socket,
-				option_name(host_level, host_name), number, current);
+			wiiu_log("net: socket %d: %s %d asked for, %d taken (it reads %d)", socket,
+				option_name(host_level, host_name), number, size, current);
+		}
+		else if (logged)
+		{
+			wiiu_log("net: socket %d: %s %d asked for, none down to %d taken: the system's size kept (%d bytes)",
+				socket, option_name(host_level, host_name), number, sizes[sizeof(sizes) / sizeof(*sizes) - 1],
+				current);
 		}
 		last_error = 0;
 		return 0;
