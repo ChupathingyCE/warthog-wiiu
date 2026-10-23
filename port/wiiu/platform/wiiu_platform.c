@@ -216,6 +216,8 @@ void platform_pump_events(void)
 		wiiu_log_flush();
 		exit(EXIT_SUCCESS);
 	}
+	/* (GX2's screens, cleared while the game draws nothing: wiiu_video.c) */
+	wiiu_video_idle();
 }
 
 /* ---------- the version (updater.c's: a console is updated with its files) */
