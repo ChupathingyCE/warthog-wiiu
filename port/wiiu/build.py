@@ -108,6 +108,9 @@ PLATFORM_FLAGS = [
     "-std=gnu11",
     "-D_GNU_SOURCE",
     "-DHALO_LINUX_PLATFORM_LAYER",
+    # internet play's tunnel logs what becomes of the host's datagrams for
+    # the game (p2p.c; the log is src/wiiu_net.c's, as the original Xbox's)
+    "-DP2P_TRACE_DATAGRAMS",
     "-Wall",
     "-Wno-unused-function",
     "-Wno-unknown-pragmas",

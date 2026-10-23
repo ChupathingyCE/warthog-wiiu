@@ -27,6 +27,10 @@ first socket that goes anywhere (wiiu_network_start):
   (http_curl.cpp:315-327; Aroma usually has the link up already).
 - ACGetAssignedAddress: the console's address, in this machine's order
   (http_curl.cpp:330, platform_wiiu.cpp:184), logged by its kind only.
+
+Every socket call that fails is logged (the call, the socket, the option or
+the destination's kind, errno and nsysnet's own code), and each socket's
+life: below, "the log of the sockets".
 */
 
 #include <errno.h>
@@ -51,6 +55,7 @@ first socket that goes anywhere (wiiu_network_start):
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
 #include <nn/ac.h>
+#include <nsysnet/_socket.h>
 
 #include "posix.h"
 #include "monocypher.h"
@@ -93,6 +98,12 @@ first socket that goes anywhere (wiiu_network_start):
 #define WSAEHOSTDOWN 10064
 #define WSAEHOSTUNREACH 10065
 
+/* (newlib's, outside its Linux extensions: wut's map of nsysnet's codes
+gives it, wut_socket_common.c) */
+#ifndef ESHUTDOWN
+#define ESHUTDOWN 110
+#endif
+
 /* Winsock SOL_SOCKET option values (winsockx.h) */
 #define WINSOCK_SOL_SOCKET 0xffff
 #define WINSOCK_SO_REUSEADDR 0x0004
@@ -109,48 +120,236 @@ void *platform_thread_local(void **key, unsigned long size);
 static void *last_error_key;
 #define last_error (*(int *)platform_thread_local(&last_error_key, sizeof(int)))
 
-static int fail(void)
+/* ---------- the log of the sockets
+
+Every socket call that fails is logged, with the call, its socket, what it
+was asked (the option, the size, the destination's kind) and the error as
+the C library gave it (errno), as nsysnet gave it (socketlasterr: wut maps
+it to errno, several of nsysnet's to EINVAL) and as the game is given it
+(Winsock's). Calls that would only block are not failures. Each call and
+error is logged its first few times, then once every so many.
+
+Each socket's life is logged too, without an address (only its kind:
+loopback, private, public, broadcast): made, bound (the port), the options
+it is given, the first datagram or bytes out to each kind of address and the
+first in from each, and at its close what it carried. That is internet
+play's tunnel step by step (p2p.c: its socket, the first probe to the host,
+the host's first answer), with the tunnel's own lines below
+(p2p_trace_packet, p2p_trace_datagram) for the handover to the game. */
+
+#define TRACED_SOCKETS 64
+/* (the first sockets of a session are the ones worth reading: the game's,
+the tunnel's, the brokers'; later ones log failures only) */
+#define LOGGED_SOCKETS 64
+
+enum
 {
-	switch (errno)
+	_kind_any,
+	_kind_loopback,
+	_kind_private,
+	_kind_shared,
+	_kind_link_local,
+	_kind_broadcast,
+	_kind_multicast,
+	_kind_public,
+	_kind_count
+};
+
+static const char *const kind_names[_kind_count] =
+{
+	"any address", "the loopback", "a private address", "a shared (carrier-grade NAT) address",
+	"a link-local address", "the broadcast address", "a multicast address", "a public address",
+};
+
+/* (network order in) */
+static int kind_of(uint32_t network_address)
+{
+	uint32_t address = ntohl(network_address);
+
+	if (!address)
+		return _kind_any;
+	if ((address >> 24) == 127)
+		return _kind_loopback;
+	if (address == 0xFFFFFFFFUL)
+		return _kind_broadcast;
+	if ((address >> 28) == 0xE)
+		return _kind_multicast;
+	if ((address >> 24) == 10 || (address >> 20) == 0xAC1 || (address >> 16) == 0xC0A8)
+		return _kind_private;
+	if ((address >> 22) == (0x64400000UL >> 22))
+		return _kind_shared;
+	if ((address >> 16) == 0xA9FE)
+		return _kind_link_local;
+	return _kind_public;
+}
+
+static const char *address_kind_of(const void *address, int length)
+{
+	const struct sockaddr_in *in = address;
+
+	if (!address || length < (int)sizeof(*in))
+		return "no address";
+	if (in->sin_family != AF_INET)
+		return "not an IPv4 address";
+	return kind_names[kind_of(in->sin_addr.s_addr)];
+}
+
+static struct socket_trace
+{
+	unsigned char used;
+	unsigned char logged;
+	unsigned char stream;
+	unsigned char sent_kinds_logged;
+	unsigned char received_kinds_logged;
+	unsigned char options_logged;
+	unsigned short port;
+	unsigned long sent, sent_bytes, send_failures, received, received_bytes;
+} socket_traces[TRACED_SOCKETS];
+static int sockets_made;
+
+static struct socket_trace *trace_of(int socket)
+{
+	return socket >= 0 && socket < TRACED_SOCKETS && socket_traces[socket].used ? &socket_traces[socket] : NULL;
+}
+
+static const char *errno_name(int error)
+{
+	switch (error)
 	{
-	case EINTR: last_error = WSAEINTR; break;
-	case EBADF: last_error = WSAEBADF; break;
-	case EACCES: case EPERM: last_error = WSAEACCES; break;
-	case EFAULT: last_error = WSAEFAULT; break;
-	case EMFILE: case ENFILE: last_error = WSAEMFILE; break;
-	case EAGAIN: last_error = WSAEWOULDBLOCK; break;
-	case EINPROGRESS: last_error = WSAEINPROGRESS; break;
-	case EALREADY: last_error = WSAEALREADY; break;
-	case ENOTSOCK: last_error = WSAENOTSOCK; break;
-	case EDESTADDRREQ: last_error = WSAEDESTADDRREQ; break;
-	case EMSGSIZE: last_error = WSAEMSGSIZE; break;
-	case EPROTOTYPE: last_error = WSAEPROTOTYPE; break;
-	case ENOPROTOOPT: last_error = WSAENOPROTOOPT; break;
-	case EPROTONOSUPPORT: last_error = WSAEPROTONOSUPPORT; break;
-	case EOPNOTSUPP: last_error = WSAEOPNOTSUPP; break;
-	case EAFNOSUPPORT: last_error = WSAEAFNOSUPPORT; break;
-	case EADDRINUSE: last_error = WSAEADDRINUSE; break;
-	case EADDRNOTAVAIL: last_error = WSAEADDRNOTAVAIL; break;
-	case ENETDOWN: last_error = WSAENETDOWN; break;
-	case ENETUNREACH: last_error = WSAENETUNREACH; break;
-	case ENETRESET: last_error = WSAENETRESET; break;
-	case ECONNABORTED: last_error = WSAECONNABORTED; break;
-	case ECONNRESET: case EPIPE: last_error = WSAECONNRESET; break;
-	case ENOBUFS: case ENOMEM: last_error = WSAENOBUFS; break;
-	case EISCONN: last_error = WSAEISCONN; break;
-	case ENOTCONN: last_error = WSAENOTCONN; break;
-	case ETIMEDOUT: last_error = WSAETIMEDOUT; break;
-	case ECONNREFUSED: last_error = WSAECONNREFUSED; break;
-	case EHOSTUNREACH: last_error = WSAEHOSTUNREACH; break;
-	default: last_error = WSAEINVAL; break;
+	case EINVAL: return "EINVAL";
+	case EBADF: return "EBADF";
+	case EACCES: return "EACCES";
+	case EPERM: return "EPERM";
+	case EFAULT: return "EFAULT";
+	case EMFILE: return "EMFILE";
+	case ENFILE: return "ENFILE";
+	case EAGAIN: return "EAGAIN";
+	case EINPROGRESS: return "EINPROGRESS";
+	case EALREADY: return "EALREADY";
+	case ENOTSOCK: return "ENOTSOCK";
+	case EDESTADDRREQ: return "EDESTADDRREQ";
+	case EMSGSIZE: return "EMSGSIZE";
+	case EPROTOTYPE: return "EPROTOTYPE";
+	case ENOPROTOOPT: return "ENOPROTOOPT";
+	case EPROTONOSUPPORT: return "EPROTONOSUPPORT";
+	case EOPNOTSUPP: return "EOPNOTSUPP";
+	case EAFNOSUPPORT: return "EAFNOSUPPORT";
+	case EADDRINUSE: return "EADDRINUSE";
+	case EADDRNOTAVAIL: return "EADDRNOTAVAIL";
+	case ENETDOWN: return "ENETDOWN";
+	case ENETUNREACH: return "ENETUNREACH";
+	case ENETRESET: return "ENETRESET";
+	case ECONNABORTED: return "ECONNABORTED";
+	case ECONNRESET: return "ECONNRESET";
+	case EPIPE: return "EPIPE";
+	case ENOBUFS: return "ENOBUFS";
+	case ENOMEM: return "ENOMEM";
+	case EISCONN: return "EISCONN";
+	case ENOTCONN: return "ENOTCONN";
+	case ESHUTDOWN: return "ESHUTDOWN";
+	case ETIMEDOUT: return "ETIMEDOUT";
+	case ECONNREFUSED: return "ECONNREFUSED";
+	case EHOSTUNREACH: return "EHOSTUNREACH";
+	case EBUSY: return "EBUSY";
+	case EIO: return "EIO";
+	case ENODEV: return "ENODEV";
+	case ECANCELED: return "ECANCELED";
+	case ENOTTY: return "ENOTTY";
+	default: return error >= 10000 ? "nsysnet's own (errno 10000 + its code)" : "another";
+	}
+}
+
+static int winsock_error_for(int error)
+{
+	switch (error)
+	{
+	case EINTR: return WSAEINTR;
+	case EBADF: return WSAEBADF;
+	case EACCES: case EPERM: return WSAEACCES;
+	case EFAULT: return WSAEFAULT;
+	case EMFILE: case ENFILE: return WSAEMFILE;
+	case EAGAIN: return WSAEWOULDBLOCK;
+	case EINPROGRESS: return WSAEINPROGRESS;
+	case EALREADY: return WSAEALREADY;
+	case ENOTSOCK: return WSAENOTSOCK;
+	case EDESTADDRREQ: return WSAEDESTADDRREQ;
+	case EMSGSIZE: return WSAEMSGSIZE;
+	case EPROTOTYPE: return WSAEPROTOTYPE;
+	case ENOPROTOOPT: return WSAENOPROTOOPT;
+	case EPROTONOSUPPORT: return WSAEPROTONOSUPPORT;
+	case EOPNOTSUPP: return WSAEOPNOTSUPP;
+	case EAFNOSUPPORT: return WSAEAFNOSUPPORT;
+	case EADDRINUSE: return WSAEADDRINUSE;
+	case EADDRNOTAVAIL: return WSAEADDRNOTAVAIL;
+	case ENETDOWN: return WSAENETDOWN;
+	case ENETUNREACH: return WSAENETUNREACH;
+	case ENETRESET: return WSAENETRESET;
+	case ECONNABORTED: return WSAECONNABORTED;
+	case ECONNRESET: case EPIPE: return WSAECONNRESET;
+	case ENOBUFS: case ENOMEM: return WSAENOBUFS;
+	case EISCONN: return WSAEISCONN;
+	case ENOTCONN: return WSAENOTCONN;
+	case ESHUTDOWN: return WSAESHUTDOWN;
+	case ETIMEDOUT: return WSAETIMEDOUT;
+	case ECONNREFUSED: return WSAECONNREFUSED;
+	case EHOSTUNREACH: return WSAEHOSTUNREACH;
+	default: return WSAEINVAL;
+	}
+}
+
+/* each call and error's count, for the log's limit */
+#define FAILURE_KINDS 48
+#define FAILURES_LOGGED 4
+#define FAILURES_THEN_EVERY 200
+static struct
+{
+	const char *call;
+	int error;
+	unsigned long count;
+} failure_counts[FAILURE_KINDS];
+
+static unsigned long failure_count(const char *call, int error)
+{
+	int index;
+
+	for (index = 0; index < FAILURE_KINDS; index++)
+	{
+		if (!failure_counts[index].call)
+		{
+			failure_counts[index].call = call;
+			failure_counts[index].error = error;
+		}
+		if (failure_counts[index].call == call && failure_counts[index].error == error)
+			return ++failure_counts[index].count;
+	}
+	return 1;
+}
+
+/* the call failed: errno and nsysnet's own code taken at once, the Winsock
+error set, the failure logged; -1 */
+static int fail_call(const char *call, int socket, const char *detail)
+{
+	int error = errno;
+	int nsysnet = RPLWRAP(socketlasterr)();
+	unsigned long count;
+
+	last_error = winsock_error_for(error);
+	if (last_error == WSAEWOULDBLOCK || last_error == WSAEINPROGRESS || last_error == WSAEALREADY)
+		return -1;
+	count = failure_count(call, error);
+	if (count <= FAILURES_LOGGED || count % FAILURES_THEN_EVERY == 0)
+	{
+		wiiu_log("net: %s on socket %d%s%s failed: errno %d (%s), nsysnet %d, Winsock %d%s", call, socket,
+			detail && *detail ? ", " : "", detail ? detail : "", error, errno_name(error), nsysnet, last_error,
+			count > FAILURES_LOGGED ? " (and as often before)" : "");
 	}
 	return -1;
 }
 
-static int succeed(int result)
+static int succeed_call(int result, const char *call, int socket, const char *detail)
 {
 	if (result < 0)
-		return fail();
+		return fail_call(call, socket, detail);
 	last_error = 0;
 	return result;
 }
@@ -162,34 +361,96 @@ int posix_socket_last_error(void)
 
 int posix_socket(int family, int type, int protocol)
 {
-	return succeed(socket(family, type, protocol));
+	int result = socket(family, type, protocol);
+	char detail[48];
+
+	snprintf(detail, sizeof(detail), "family %d, type %d, protocol %d", family, type, protocol);
+	if (result < 0)
+		return fail_call("socket", -1, detail);
+	last_error = 0;
+	if (result >= 0 && result < TRACED_SOCKETS)
+	{
+		struct socket_trace *trace = &socket_traces[result];
+
+		memset(trace, 0, sizeof(*trace));
+		trace->used = 1;
+		trace->stream = type == SOCK_STREAM;
+		trace->logged = ++sockets_made <= LOGGED_SOCKETS;
+		if (trace->logged)
+			wiiu_log("net: socket %d made (%s)", result, trace->stream ? "TCP" : type == SOCK_DGRAM ? "UDP" : detail);
+	}
+	return result;
 }
 
 int posix_socket_close(int socket)
 {
-	return succeed(close(socket));
+	struct socket_trace *trace = trace_of(socket);
+
+	if (trace)
+	{
+		if (trace->logged && (trace->sent || trace->received || trace->send_failures))
+		{
+			wiiu_log("net: socket %d closed: %lu out (%lu bytes, %lu failed), %lu in (%lu bytes)", socket, trace->sent,
+				trace->sent_bytes, trace->send_failures, trace->received, trace->received_bytes);
+		}
+		trace->used = 0;
+	}
+	return succeed_call(close(socket), "close", socket, NULL);
 }
 
 int posix_socket_bind(int socket, const void *address, int address_length)
 {
-	return succeed(bind(socket, address, (socklen_t)address_length));
+	const struct sockaddr_in *in = address;
+	struct socket_trace *trace = trace_of(socket);
+	char detail[64];
+	int result;
+
+	snprintf(detail, sizeof(detail), "%s, port %u", address_kind_of(address, address_length),
+		address && address_length >= (int)sizeof(*in) ? (unsigned)ntohs(in->sin_port) : 0u);
+	result = bind(socket, address, (socklen_t)address_length);
+	if (result < 0)
+		return fail_call("bind", socket, detail);
+	last_error = 0;
+	if (trace && trace->logged)
+	{
+		struct sockaddr_in bound;
+		socklen_t length = sizeof(bound);
+
+		if (getsockname(socket, (struct sockaddr *)&bound, &length) == 0)
+		{
+			trace->port = bound.sin_port;
+			wiiu_log("net: socket %d bound to %s, port %u", socket, detail, (unsigned)ntohs(bound.sin_port));
+		}
+		else
+		{
+			wiiu_log("net: socket %d bound to %s (getsockname then failed: errno %d)", socket, detail, errno);
+		}
+	}
+	return result;
 }
 
 int posix_socket_connect(int socket, const void *address, int address_length)
 {
+	const struct sockaddr_in *in = address;
+	struct socket_trace *trace = trace_of(socket);
+	char detail[64];
 	int result = connect(socket, address, (socklen_t)address_length);
 
+	snprintf(detail, sizeof(detail), "to %s, port %u", address_kind_of(address, address_length),
+		address && address_length >= (int)sizeof(*in) ? (unsigned)ntohs(in->sin_port) : 0u);
+	if (trace && trace->logged)
+		wiiu_log("net: socket %d connecting %s", socket, detail);
 	if (result < 0 && (errno == EINPROGRESS || errno == EWOULDBLOCK))
 	{
 		last_error = WSAEWOULDBLOCK;
 		return -1;
 	}
-	return succeed(result);
+	return succeed_call(result, "connect", socket, detail);
 }
 
 int posix_socket_listen(int socket, int backlog)
 {
-	return succeed(listen(socket, backlog));
+	return succeed_call(listen(socket, backlog), "listen", socket, NULL);
 }
 
 int posix_socket_accept(int socket, void *address, int *address_length)
@@ -199,27 +460,107 @@ int posix_socket_accept(int socket, void *address, int *address_length)
 
 	if (address_length)
 		*address_length = (int)length;
-	return succeed(result);
+	return succeed_call(result, "accept", socket, NULL);
+}
+
+/* the first datagram or bytes out to each kind of address, and each that
+failed (the error is fail_call's) */
+static void trace_sent(int socket, const void *address, int address_length, int length, int result)
+{
+	struct socket_trace *trace = trace_of(socket);
+	const struct sockaddr_in *in = address;
+	int kind;
+
+	if (!trace)
+		return;
+	if (result < 0)
+	{
+		if (last_error != WSAEWOULDBLOCK)
+			trace->send_failures++;
+		return;
+	}
+	trace->sent++;
+	trace->sent_bytes += (unsigned long)result;
+	kind = in && address_length >= (int)sizeof(*in) && in->sin_family == AF_INET ? kind_of(in->sin_addr.s_addr) : -1;
+	if (trace->logged && kind >= 0 && !(trace->sent_kinds_logged & (1u << kind)))
+	{
+		trace->sent_kinds_logged |= (unsigned char)(1u << kind);
+		wiiu_log("net: socket %d (port %u): first datagram out to %s, port %u (%d of %d bytes)", socket,
+			(unsigned)ntohs(trace->port), kind_names[kind], (unsigned)ntohs(in->sin_port), result, length);
+	}
+	else if (trace->logged && kind < 0 && trace->sent == 1)
+	{
+		wiiu_log("net: socket %d: first bytes out (%d of %d)", socket, result, length);
+	}
+}
+
+static void trace_received(int socket, const void *address, int address_length, int result)
+{
+	struct socket_trace *trace = trace_of(socket);
+	const struct sockaddr_in *in = address;
+	int kind;
+
+	if (!trace || result < 0)
+		return;
+	trace->received++;
+	trace->received_bytes += (unsigned long)result;
+	kind = in && address_length >= (int)sizeof(*in) && in->sin_family == AF_INET ? kind_of(in->sin_addr.s_addr) : -1;
+	if (trace->logged && kind >= 0 && !(trace->received_kinds_logged & (1u << kind)))
+	{
+		trace->received_kinds_logged |= (unsigned char)(1u << kind);
+		wiiu_log("net: socket %d (port %u): first datagram in from %s, port %u (%d bytes)", socket,
+			(unsigned)ntohs(trace->port), kind_names[kind], (unsigned)ntohs(in->sin_port), result);
+	}
+	else if (trace->logged && kind < 0 && trace->received == 1)
+	{
+		wiiu_log("net: socket %d: first bytes in (%d)", socket, result);
+	}
 }
 
 int posix_socket_send(int socket, const void *buffer, int length, int flags)
 {
-	return succeed((int)send(socket, buffer, (size_t)length, flags));
+	char detail[40];
+	int result;
+
+	snprintf(detail, sizeof(detail), "%d bytes, flags 0x%x", length, (unsigned)flags);
+	result = succeed_call((int)send(socket, buffer, (size_t)length, flags), "send", socket, detail);
+	trace_sent(socket, NULL, 0, length, result);
+	return result;
 }
 
 int posix_socket_sendto(int socket, const void *buffer, int length, int flags,
 	const void *address, int address_length)
 {
+	const struct sockaddr_in *in = address;
+	char detail[96];
 	int result = (int)sendto(socket, buffer, (size_t)length, flags, address, (socklen_t)address_length);
 
 	if (result < 0 && errno == EISCONN)
 		result = (int)send(socket, buffer, (size_t)length, flags);
-	return succeed(result);
+	if (result < 0)
+	{
+		int error = errno;
+
+		snprintf(detail, sizeof(detail), "%d bytes to %s, port %u, flags 0x%x", length,
+			address_kind_of(address, address_length),
+			in && address_length >= (int)sizeof(*in) ? (unsigned)ntohs(in->sin_port) : 0u, (unsigned)flags);
+		errno = error;
+		fail_call("sendto", socket, detail);
+	}
+	else
+	{
+		last_error = 0;
+	}
+	trace_sent(socket, address, address_length, length, result);
+	return result;
 }
 
 int posix_socket_recv(int socket, void *buffer, int length, int flags)
 {
-	return succeed((int)recv(socket, buffer, (size_t)length, flags));
+	int result = succeed_call((int)recv(socket, buffer, (size_t)length, flags), "recv", socket, NULL);
+
+	trace_received(socket, NULL, 0, result);
+	return result;
 }
 
 int posix_socket_recvfrom(int socket, void *buffer, int length, int flags,
@@ -231,26 +572,32 @@ int posix_socket_recvfrom(int socket, void *buffer, int length, int flags,
 
 	if (address_length)
 		*address_length = (int)socket_length;
-	return succeed(result);
+	result = succeed_call(result, "recvfrom", socket, NULL);
+	trace_received(socket, address, address_length ? *address_length : 0, result);
+	return result;
 }
 
 int posix_socket_shutdown(int socket, int how)
 {
-	return succeed(shutdown(socket, how));
+	return succeed_call(shutdown(socket, how), "shutdown", socket, NULL);
 }
 
+/* (SO_NONBLOCK, as Butter and Jelly's discovery.cpp SetNonBlocking does it
+on the Wii U, and wut's fcntl and FIONBIO do underneath) */
 int posix_socket_set_nonblocking(int socket, int nonblocking)
 {
 	int value = nonblocking ? 1 : 0;
 
-	return succeed(setsockopt(socket, SOL_SOCKET, SO_NONBLOCK, &value, sizeof(value)));
+	return succeed_call(setsockopt(socket, SOL_SOCKET, SO_NONBLOCK, &value, sizeof(value)), "setsockopt",
+		socket, nonblocking ? "SO_NONBLOCK 1" : "SO_NONBLOCK 0");
 }
 
 int posix_socket_set_nodelay(int socket)
 {
 	int value = 1;
 
-	return succeed(setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &value, sizeof(value)));
+	return succeed_call(setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &value, sizeof(value)), "setsockopt",
+		socket, "TCP_NODELAY 1");
 }
 
 int posix_socket_bytes_available(int socket, posix_ulong *count)
@@ -260,7 +607,7 @@ int posix_socket_bytes_available(int socket, posix_ulong *count)
 
 	if (result >= 0)
 		*count = (posix_ulong)available;
-	return succeed(result);
+	return succeed_call(result, "ioctl", socket, "FIONREAD");
 }
 
 static int translate_option(int level, int name, int *host_level, int *host_name)
@@ -286,9 +633,36 @@ static int translate_option(int level, int name, int *host_level, int *host_name
 	}
 }
 
+static const char *option_name(int level, int name)
+{
+	if (level == SOL_SOCKET)
+	{
+		switch (name)
+		{
+		case SO_REUSEADDR: return "SO_REUSEADDR";
+		case SO_KEEPALIVE: return "SO_KEEPALIVE";
+		case SO_BROADCAST: return "SO_BROADCAST";
+		case SO_LINGER: return "SO_LINGER";
+		case SO_SNDBUF: return "SO_SNDBUF";
+		case SO_RCVBUF: return "SO_RCVBUF";
+		case SO_ERROR: return "SO_ERROR";
+		case SO_TYPE: return "SO_TYPE";
+		case SO_NONBLOCK: return "SO_NONBLOCK";
+		case SO_WINSCALE: return "SO_WINSCALE";
+		case SO_RUSRBUF: return "SO_RUSRBUF";
+		}
+		return "a SOL_SOCKET option";
+	}
+	if (level == IPPROTO_TCP && name == TCP_NODELAY)
+		return "TCP_NODELAY";
+	return "an option";
+}
+
 int posix_socket_setsockopt(int socket, int level, int name, const void *value, int length)
 {
-	int host_level, host_name;
+	struct socket_trace *trace = trace_of(socket);
+	int host_level, host_name, number = 0, result;
+	char detail[96];
 
 	if (translate_option(level, name, &host_level, &host_name) != 0)
 	{
@@ -296,13 +670,60 @@ int posix_socket_setsockopt(int socket, int level, int name, const void *value, 
 		last_error = 0;
 		return 0;
 	}
-	return succeed(setsockopt(socket, host_level, host_name, value, (socklen_t)length));
+	if (value && length == (int)sizeof(int))
+		memcpy(&number, value, sizeof(number));
+	snprintf(detail, sizeof(detail), "%s (level %d, option 0x%x) %d, %d bytes", option_name(host_level, host_name),
+		host_level, (unsigned)host_name, number, length);
+	if (host_level == SOL_SOCKET && (host_name == SO_SNDBUF || host_name == SO_RCVBUF))
+	{
+		/* the buffers stay the system's own size. The game and internet
+		play's tunnel ask for 1 MB each (transport_endpoint_winsock.c,
+		p2p.c), on every socket: more than all the memory an application
+		can give the console's network for its sockets' buffers (wut's
+		nn/nets2/somemopt.h: 128 KB to 3 MB), and Butter and Jelly asks for
+		256 KB at most (http_curl.cpp, ConfigureSocket). The UDP socket
+		proven on this console (wiiu_online.c's test) has the system's
+		sizes. A size asked for is taken as Linux takes one above its limit:
+		without an error */
+		int current = 0;
+		socklen_t current_length = sizeof(current);
+
+		if (getsockopt(socket, SOL_SOCKET, host_name, &current, &current_length) != 0)
+			current = -1;
+		if (trace && trace->logged && !(trace->options_logged & (host_name == SO_SNDBUF ? 1 : 2)))
+		{
+			trace->options_logged |= (unsigned char)(host_name == SO_SNDBUF ? 1 : 2);
+			wiiu_log("net: socket %d: %s %d asked for; the system's own size kept (%d bytes)", socket,
+				option_name(host_level, host_name), number, current);
+		}
+		last_error = 0;
+		return 0;
+	}
+	if (host_level == SOL_SOCKET && host_name == SO_BROADCAST && length == (int)sizeof(int))
+	{
+		/* (on or off: the game asks with -1, Butter and Jelly's discovery.cpp
+		with 1) */
+		int on = number != 0;
+
+		result = setsockopt(socket, host_level, host_name, &on, sizeof(on));
+	}
+	else
+	{
+		result = setsockopt(socket, host_level, host_name, value, (socklen_t)length);
+	}
+	if (result < 0)
+		return fail_call("setsockopt", socket, detail);
+	last_error = 0;
+	if (trace && trace->logged)
+		wiiu_log("net: socket %d: %s set", socket, detail);
+	return result;
 }
 
 int posix_socket_getsockopt(int socket, int level, int name, void *value, int *length)
 {
 	int host_level, host_name;
 	socklen_t socket_length = (socklen_t)*length;
+	char detail[64];
 	int result;
 
 	if (translate_option(level, name, &host_level, &host_name) != 0)
@@ -312,7 +733,9 @@ int posix_socket_getsockopt(int socket, int level, int name, void *value, int *l
 	}
 	result = getsockopt(socket, host_level, host_name, value, &socket_length);
 	*length = (int)socket_length;
-	return succeed(result);
+	snprintf(detail, sizeof(detail), "%s (level %d, option 0x%x)", option_name(host_level, host_name), host_level,
+		(unsigned)host_name);
+	return succeed_call(result, "getsockopt", socket, detail);
 }
 
 int posix_socket_getsockname(int socket, void *address, int *address_length)
@@ -322,7 +745,7 @@ int posix_socket_getsockname(int socket, void *address, int *address_length)
 
 	if (address_length)
 		*address_length = (int)length;
-	return succeed(result);
+	return succeed_call(result, "getsockname", socket, NULL);
 }
 
 int posix_socket_getpeername(int socket, void *address, int *address_length)
@@ -332,11 +755,13 @@ int posix_socket_getpeername(int socket, void *address, int *address_length)
 
 	if (address_length)
 		*address_length = (int)length;
-	return succeed(result);
+	return succeed_call(result, "getpeername", socket, NULL);
 }
 
 /* Winsock's select over lists of sockets, by poll: read for data, the end
-or an error, write for room or an error, error for a connect that failed */
+or an error, write for room or an error, error for a connect that failed.
+(wut's poll is nsysnet's select underneath, whose sets hold sockets 0 to 31:
+wut_socket's poll.c) */
 int posix_socket_select(int *read, int *read_count, int *write, int *write_count,
 	int *error, int *error_count, posix_long timeout_seconds, posix_long timeout_microseconds, int infinite)
 {
@@ -361,7 +786,7 @@ int posix_socket_select(int *read, int *read_count, int *write, int *write_count
 	if (total && !descriptors)
 	{
 		errno = ENOMEM;
-		return fail();
+		return fail_call("select", -1, "no memory for the list");
 	}
 	total = 0;
 	for (list = 0; list < 3; list++)
@@ -387,8 +812,19 @@ int posix_socket_select(int *read, int *read_count, int *write, int *write_count
 	}
 	if (result < 0)
 	{
+		char detail[96];
+		int highest = -1, failure = errno;
+
+		for (index = 0; index < total; index++)
+		{
+			if (descriptors[index].fd > highest)
+				highest = descriptors[index].fd;
+		}
+		snprintf(detail, sizeof(detail), "%d sockets (%d read, %d write), the highest %d, %lld ms", total,
+			lists[0] ? *counts[0] : 0, lists[1] ? *counts[1] : 0, highest, infinite ? -1LL : milliseconds);
 		free(descriptors);
-		return fail();
+		errno = failure;
+		return fail_call("select", -1, detail);
 	}
 	result = 0;
 	total = 0;
@@ -409,7 +845,7 @@ int posix_socket_select(int *read, int *read_count, int *write, int *write_count
 			if (list == 1 && getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &pending, &length) == 0 && pending)
 			{
 				errno = pending;
-				fail();
+				fail_call("connect (found by select)", descriptor, NULL);
 				continue;
 			}
 			lists[list][kept++] = descriptor;
@@ -422,6 +858,70 @@ int posix_socket_select(int *read, int *read_count, int *write, int *write_count
 	if (result > 0)
 		last_error = 0;
 	return result;
+}
+
+/* ---------- internet play's tunnel, to the game (p2p.c, P2P_TRACE_DATAGRAMS)
+
+What became of the datagrams the host sends the game through the tunnel:
+the handover from the tunnel to the game's own connection. As the original
+Xbox logs them (warthog-xbox's port/xbox/src/xbox_p2p.c): each outcome its
+first four times, then every 10 seconds; and the packets the tunnel opened,
+by type, every 10 seconds for the first two minutes, then every minute. */
+
+void p2p_trace_datagram(unsigned short source_port, unsigned short port, int size, int result)
+{
+	static const char *const outcomes[] =
+	{
+		"no stand-in for it",
+		"not a port of the game's",
+		"not sent to the game",
+		"sent to the game",
+	};
+	static struct
+	{
+		long count;
+		long logged;
+		OSTime time;
+	} traced[4];
+	int outcome = result + 2;
+	OSTime now = OSGetSystemTime();
+
+	if (outcome < 0 || outcome > 3)
+		return;
+	traced[outcome].count++;
+	if (traced[outcome].logged < 4 || OSTicksToMilliseconds(now - traced[outcome].time) >= 10000)
+	{
+		wiiu_log("tunnel: %ld datagram(s) from the host's port %u for the game's port %u (%d bytes): %s",
+			traced[outcome].count, (unsigned)ntohs(source_port), (unsigned)ntohs(port), size, outcomes[outcome]);
+		traced[outcome].count = 0;
+		traced[outcome].logged++;
+		traced[outcome].time = now;
+	}
+}
+
+void p2p_trace_packet(int type, int size)
+{
+	static long counts[8];
+	static long bytes, total;
+	static OSTime time, first;
+	OSTime now = OSGetSystemTime();
+
+	if (!total++)
+	{
+		first = time = now;
+		wiiu_log("tunnel: the first packet from a peer opened (type %d, %d bytes)", type, size);
+	}
+	counts[type >= 0 && type < 8 ? type : 7]++;
+	bytes += size;
+	if (OSTicksToMilliseconds(now - time) >= (OSTicksToMilliseconds(now - first) < 120000 ? 10000 : 60000))
+	{
+		wiiu_log("tunnel: in the last %lld s, from peers: types 0-7 %ld %ld %ld %ld %ld %ld %ld %ld (%ld bytes)",
+			(long long)OSTicksToMilliseconds(now - time) / 1000, counts[0], counts[1], counts[2], counts[3], counts[4],
+			counts[5], counts[6], counts[7], bytes);
+		memset(counts, 0, sizeof(counts));
+		bytes = 0;
+		time = now;
+	}
 }
 
 /* ---------- the network (nn::ac), and the console's address */

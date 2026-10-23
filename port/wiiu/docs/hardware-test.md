@@ -51,10 +51,34 @@ What the log should say, in order (`port.txt`):
   address, only its kind.
 - `net test: UDP to this console's own port came back, by its own address`
   (or by the loopback: datagrams work, but not out to the network and back).
+- `net test: UDP to the loopback came back`: the way internet play hands
+  the host's datagrams to the game.
+- Three `net test: UDP out to the internet (STUN stun.cloudflare.com, ...)`
+  lines, each `answered (N ms)` or `FAILED: <why>`: a plain socket; a
+  socket made on one thread and used from another (as internet play's
+  tunnel is); a socket given 1 MB buffers (as the tunnel and the game asked
+  for before; the line gives whether the console took or refused each
+  size, with errno and nsysnet's code). Which of them answers says why the
+  tunnel could not reach the host: send all three lines.
 - `net test: DNS warthog.milenko.org resolved (N ms)`
 - `net test: HTTP GET /v1/console/games: status 200, N bytes, N games
   (N named Warthog)`: the list as ONLINE GAMES shows it.
 - `game list: N games (format 1)`, then `net test: done`.
+
+The `net:` lines are every socket's life and every socket call that
+failed: `net: socket N made (UDP)`, `bound to ..., port N`, the options it
+was given, its first datagram out to and in from each kind of address
+(never the address), and `net: <call> on socket N, <what was asked> failed:
+errno N (<name>), nsysnet N, Winsock N`. Internet play's tunnel is the
+first UDP socket bound to any address with `SO_SNDBUF 1048576 asked for`
+after it; its `first datagram out to a public address` is its first STUN
+request or probe, `first datagram in from a public address` the first
+answer. Then `Internet play: connected to host ...`, `tunnel: the first
+packet from a peer opened`, and `tunnel: N datagram(s) from the host's port
+5150 for the game's port N: sent to the game`: the handover to the game.
+
+Never copy `pad-test.txt` to the console's card: it lets a file press the
+GamePad's buttons, for unattended runs in Cemu (src/wiiu_pad.c).
 
 In `logs/debug.txt`, when joining: `online games: joining [C] Warthog 1`,
 `joining a host of network version 32`, `the host's game was advertised

@@ -25,6 +25,7 @@ The Xbox 360's (ChupathingyCE/warthog-360, port/xbox360/src/x360_online.c)
 on the Wii U's threads and clock.
 */
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -33,6 +34,7 @@ on the Wii U's threads and clock.
 #include <sys/socket.h>
 
 #include <coreinit/time.h>
+#include <nsysnet/_socket.h>
 
 #include "posix.h"
 #include "thread_stop.h"
@@ -286,6 +288,208 @@ static int udp_echo_to(unsigned long address, unsigned long *milliseconds, const
 	return count == (int)sizeof(probe) && !memcmp(reply, probe, sizeof(probe));
 }
 
+/* ---------- UDP out to the internet: a STUN binding request (RFC 5389)
+
+Internet play's tunnel is a UDP socket that reaches public addresses: STUN
+servers (this machine's public address), the host. The echo above never
+leaves the console. Three sockets ask stun.cloudflare.com, each the way the
+tunnel could have made it, so a run says which way works:
+
+1. a plain socket, as the echo's (the system's buffer sizes);
+2. the same, made on this thread and used from another's, as the tunnel's
+   (made where WSAStartup is called, p2p_initialize, used from internet
+   play's thread);
+3. a socket given 1 MB buffers through nsysnet itself (wiiu_net.c no longer
+   passes them on), as the tunnel and the game asked before this build.
+
+Each line gives the setsockopt results (errno and nsysnet's code), and
+whether the answer came. */
+
+#define STUN_HOST "stun.cloudflare.com"
+#define STUN_PORT 3478
+#define STUN_WAIT 3000
+
+struct stun_ask
+{
+	int handle;
+	unsigned long server;
+	int answered;
+	unsigned long milliseconds;
+	const char *failure;
+	int send_error;
+	int done;
+};
+
+static void stun_ask_run(struct stun_ask *ask)
+{
+	unsigned char request[20], reply[512];
+	struct sockaddr_in to, from;
+	int from_length = sizeof(from), count;
+	unsigned long start;
+
+	memset(request, 0, sizeof(request));
+	request[1] = 0x01;
+	request[4] = 0x21; request[5] = 0x12; request[6] = 0xA4; request[7] = 0x42;
+	posix_random_bytes(request + 8, 12);
+	memset(&to, 0, sizeof(to));
+	to.sin_family = AF_INET;
+	to.sin_port = htons(STUN_PORT);
+	to.sin_addr.s_addr = (in_addr_t)ask->server;
+	start = now_ms();
+	if (posix_socket_sendto(ask->handle, request, sizeof(request), 0, &to, sizeof(to)) != (int)sizeof(request))
+	{
+		ask->send_error = posix_socket_last_error();
+		ask->failure = "the send failed";
+		return;
+	}
+	for (;;)
+	{
+		if (!wait_ready(ask->handle, 0, start + STUN_WAIT))
+		{
+			ask->failure = "no answer within 3 s";
+			return;
+		}
+		from_length = sizeof(from);
+		count = posix_socket_recvfrom(ask->handle, reply, sizeof(reply), 0, &from, &from_length);
+		if (count >= 20 && reply[0] == 0x01 && reply[1] == 0x01 && !memcmp(reply + 8, request + 8, 12))
+			break;
+		if (count < 0 && posix_socket_last_error() != WSAEWOULDBLOCK)
+		{
+			ask->failure = "the receive failed";
+			return;
+		}
+	}
+	ask->milliseconds = now_ms() - start;
+	ask->answered = 1;
+}
+
+static void *stun_ask_thread(void *parameter)
+{
+	struct stun_ask *ask = parameter;
+
+	stun_ask_run(ask);
+	__atomic_store_n(&ask->done, 1, __ATOMIC_RELEASE);
+	return NULL;
+}
+
+/* a UDP socket bound to any address, port 0, not blocking; -1 */
+static int stun_socket(void)
+{
+	struct sockaddr_in local;
+	int handle = posix_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+	if (handle < 0)
+		return -1;
+	memset(&local, 0, sizeof(local));
+	local.sin_family = AF_INET;
+	local.sin_addr.s_addr = htonl(INADDR_ANY);
+	if (posix_socket_bind(handle, &local, sizeof(local)) != 0 || posix_socket_set_nonblocking(handle, 1) != 0)
+	{
+		posix_socket_close(handle);
+		return -1;
+	}
+	return handle;
+}
+
+/* nsysnet's own setsockopt of a buffer size, and what the socket has after */
+static void stun_raw_buffer(int handle, int option, const char *name, char *text, size_t size)
+{
+	int value = 1 << 20, result, error, nsysnet, after = -1;
+	socklen_t length = sizeof(after);
+
+	errno = 0;
+	result = setsockopt(handle, SOL_SOCKET, option, &value, sizeof(value));
+	error = errno;
+	nsysnet = RPLWRAP(socketlasterr)();
+	getsockopt(handle, SOL_SOCKET, option, &after, &length);
+	if (result == 0)
+		snprintf(text, size, "%s 1048576 taken (it reads %d)", name, after);
+	else
+		snprintf(text, size, "%s 1048576 refused (errno %d, nsysnet %d; it reads %d)", name, error, nsysnet, after);
+}
+
+static void stun_tests(void)
+{
+	static const char *const ways[3] =
+	{
+		"a plain socket",
+		"a socket made on this thread, used from another",
+		"a socket given 1 MB buffers",
+	};
+	unsigned long server = (unsigned long)posix_resolve_ipv4(STUN_HOST);
+	int way;
+
+	if (!server)
+	{
+		wiiu_log("net test: UDP out to the internet: DNS %s FAILED; not tested", STUN_HOST);
+		return;
+	}
+	for (way = 0; way < 3; way++)
+	{
+		/* (kept: a thread that does not finish keeps its socket and this) */
+		static struct stun_ask asks[3];
+		struct stun_ask *ask = &asks[way];
+		char buffers[2][96] = { "", "" };
+
+		memset(ask, 0, sizeof(*ask));
+		ask->server = server;
+		ask->handle = stun_socket();
+		if (ask->handle < 0)
+		{
+			wiiu_log("net test: UDP out to the internet (STUN, %s) FAILED: no socket (Winsock %d)", ways[way],
+				posix_socket_last_error());
+			continue;
+		}
+		if (way == 2)
+		{
+			stun_raw_buffer(ask->handle, SO_SNDBUF, "SO_SNDBUF", buffers[0], sizeof(buffers[0]));
+			stun_raw_buffer(ask->handle, SO_RCVBUF, "SO_RCVBUF", buffers[1], sizeof(buffers[1]));
+		}
+		if (way == 1)
+		{
+			unsigned long deadline = now_ms() + STUN_WAIT + 2000;
+
+			if (thread_stop_create("net test STUN", stun_ask_thread, ask) != 0)
+			{
+				ask->failure = "no thread";
+			}
+			else
+			{
+				while (!__atomic_load_n(&ask->done, __ATOMIC_ACQUIRE) && (long)(deadline - now_ms()) > 0)
+				{
+					if (thread_stop_sleep(50))
+						break;
+				}
+				if (!__atomic_load_n(&ask->done, __ATOMIC_ACQUIRE))
+				{
+					/* (the thread still has the socket: left open) */
+					wiiu_log("net test: UDP out to the internet (STUN, %s): the thread did not finish", ways[way]);
+					continue;
+				}
+			}
+		}
+		else
+		{
+			stun_ask_run(ask);
+		}
+		posix_socket_close(ask->handle);
+		if (ask->answered)
+		{
+			wiiu_log("net test: UDP out to the internet (STUN %s, %s): answered (%lu ms)%s%s%s%s", STUN_HOST,
+				ways[way], ask->milliseconds, *buffers[0] ? "; " : "", buffers[0], *buffers[1] ? "; " : "", buffers[1]);
+		}
+		else
+		{
+			wiiu_log("net test: UDP out to the internet (STUN %s, %s) FAILED: %s%s%s%s%s", STUN_HOST, ways[way],
+				ask->failure ? ask->failure : "?", *buffers[0] ? "; " : "", buffers[0], *buffers[1] ? "; " : "",
+				buffers[1]);
+			if (ask->send_error)
+				wiiu_log("net test:   the send's Winsock error %d (errno: the \"net: sendto\" line above)",
+					ask->send_error);
+		}
+	}
+}
+
 /* the console's own address (the way a datagram goes out to the network
 and back), then the loopback's: which came back, NULL for neither */
 static const char *udp_echo(unsigned long *milliseconds, const char **failure)
@@ -366,6 +570,13 @@ static void self_test(void)
 		wiiu_log("net test: UDP to this console's own port came back, by %s (%lu ms)", way, milliseconds);
 	else
 		wiiu_log("net test: UDP to this console's own port FAILED: %s", failure);
+	/* (the loopback on its own too: internet play hands the host's
+	datagrams to the game by it, network.address being empty) */
+	if (udp_echo_to(htonl(0x7F000001UL), &milliseconds, &failure))
+		wiiu_log("net test: UDP to the loopback came back (%lu ms)", milliseconds);
+	else
+		wiiu_log("net test: UDP to the loopback FAILED: %s", failure);
+	stun_tests();
 }
 
 static void *online_thread(void *parameter)

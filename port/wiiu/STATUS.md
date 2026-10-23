@@ -387,3 +387,48 @@ after joining (the map's check, as on the desktop). Hosting from the Wii U
 is untested.
 
 The console's checklist: docs/hardware-test.md, "Online".
+
+## Online on the console: the first run (2026-10-22)
+
+**Works, on the console.** The byte order (27 of 27), UDP to its own
+address, DNS, the console game list over HTTP (21 games) and ONLINE GAMES.
+
+**Does not.** Joining `[C] Quick Match` and `[C] Warthog 1`: internet play
+reached the host through the brokers (TCP), but the tunnel never heard
+from it, nor from the STUN servers (no `this machine's public address`
+line); the join gave up ("could not connect") or waited. And one
+`winsock error #10022: WSAEINVAL` when the game's network started.
+
+What Cemu shows with this build's socket log: there the 10022 is the bind
+of the game's port 5151 (nsysnet 99999, Cemu's own; the game then takes
+another port). On the console the bind did not fail (no "the client port
+is in use" line), so its 10022 came from the options the game gives each
+socket before binding: SO_BROADCAST with -1, or the 1 MB SO_SNDBUF and
+SO_RCVBUF it and the tunnel ask for (more than the most an application can
+give the console's network for all its sockets' buffers: wut's
+nn/nets2/somemopt.h, 128 KB to 3 MB). nsysnet's errors that wut has no
+errno for all become EINVAL (wut_socket_common.c), so 10022 alone does not
+say which.
+
+This build:
+
+- every socket keeps the system's buffer sizes (a size asked for is taken
+  without an error, as Linux takes one above its limit), and SO_BROADCAST
+  is given 1 (as Butter and Jelly's discovery.cpp does);
+- every failed socket call is logged with its option or destination kind,
+  errno, nsysnet's own code and the Winsock error; each socket's life and
+  its first datagram out to and in from each kind of address; the
+  tunnel's packets and the datagrams it hands the game (P2P_TRACE_DATAGRAMS,
+  as the original Xbox logs them);
+- the network test also sends UDP out to the internet: a STUN request from
+  a plain socket, from a socket used on another thread than the one that
+  made it (as the tunnel), and from one given 1 MB buffers through nsysnet
+  itself; and UDP through the loopback (the tunnel's way to the game).
+
+In Cemu, with this build, `[C] Warthog 1` was joined through the tunnel
+again (connected, advertised, joined; Cemu's card did not have the map
+being played, so it left after the settings record, as it should).
+
+**Next.** The console's run: the three STUN lines and the tunnel socket's
+`net:` lines say which way of making a UDP socket reaches the internet
+from the Wii U, and the next build makes the tunnel that way.
