@@ -23,10 +23,16 @@ your own copy of Halo (the NTSC maps, 01.10.12.2276) into
 - HOME and Close from the HOME Menu
 - Sound
 - The GamePad and the Pro Controller: A to accept, B to go back
+- Servers of up to 32 players in Online Games
+- The Halo CE+ map pack: copy its maps to `wiiu/apps/halo/maps_cex` to join
+  CE+ games
 
 ## Known issues
 
 - Online matches run at about 15 fps (frame pacing); this is being worked on.
+- Some effects, like grenade smoke, have a pink or purple tint.
+- If Chupathingy stays on a dark screen at start, turn the Wii U fully off
+  and on again. This can happen after closing it from the HOME Menu.
 - The campaign has not been tested yet.
 - Games on older OpenCE versions show "not accepting players".
 - No movies: they are skipped.
