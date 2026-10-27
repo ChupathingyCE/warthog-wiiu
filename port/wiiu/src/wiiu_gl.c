@@ -184,10 +184,14 @@ static void debug_load(void)
 #ifdef HALO_WIIU_GL_SWITCHES
 	FILE *file;
 	char word[64];
+#endif
 
+	/* (once: it's asked for on every draw and texture, and each line of the
+	description is a write to the SD card) */
 	if (debug.loaded)
 		return;
 	debug.loaded = 1;
+#ifdef HALO_WIIU_GL_SWITCHES
 	file = fopen(WIIU_APP_FOLDER "/gl.txt", "rb");
 	if (!file)
 	{
@@ -238,8 +242,6 @@ static void debug_load(void)
 	fclose(file);
 	wiiu_log("gl: debug switches read (draws %s, culling %s%s)", debug.no_draws ? "off" : "on",
 		debug.no_cull ? "off" : "on", debug.swap_winding ? ", winding swapped" : "");
-#else
-	debug.loaded = 1;
 #endif
 	debug_describe();
 }
