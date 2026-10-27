@@ -18,19 +18,19 @@ consoles read the same list the same way.
 #define __WIIU_GAME_LIST_H
 
 #define GAME_LIST_HOST "warthog.milenko.org"
-/* a build of more than 16 players (configure.py --console-players) asks
-for the games set for up to its own count; a stock build's plain request
-gets those of up to 16 */
-#if defined(HALO_CONSOLE_PLAYERS) && HALO_CONSOLE_PLAYERS > 16
+/* the games set for up to this build's player count (configure.py
+--console-players), else up to 32, which the Wii U joins as the other
+consoles do */
 #define GAME_LIST_STRING_OF(x) #x
 #define GAME_LIST_STRING(x) GAME_LIST_STRING_OF(x)
-#define GAME_LIST_PATH "/v1/console/games?players=" GAME_LIST_STRING(HALO_CONSOLE_PLAYERS)
+#if defined(HALO_CONSOLE_PLAYERS) && HALO_CONSOLE_PLAYERS > 16
+#define GAME_LIST_PATH "/v1/console/games?packs=1&players=" GAME_LIST_STRING(HALO_CONSOLE_PLAYERS)
 #else
-#define GAME_LIST_PATH "/v1/console/games"
+#define GAME_LIST_PATH "/v1/console/games?packs=1&players=32"
 #endif
-/* (no packs=1: this build has no Xbox map packs yet, so it asks without it
-and the list leaves their games out, as it does for the original Xbox's
-builds before map packs) */
+/* (packs=1: this build plays Xbox map packs' maps, <file>@<pack> in
+maps_<pack> beside maps, so the list sends their games too, as it does for
+the original Xbox's and the 360's builds) */
 #define GAME_LIST_PORT 80
 /* the whole response, headers and all, at most: the console's list is
 filtered to the games it can join (about 130 bytes a line, 41 lines in
