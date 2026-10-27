@@ -469,3 +469,22 @@ file) and loads Blood Gulch.
   (stereo), the stream's device and `SDL_GetTicks`.
 - Cemu's recompiler stops it while the menus are built (a call's saved
   values read back as zero); run Cemu with `--force-interpreter`.
+
+## Map packs, big games and the menu stall (2026-10-27)
+
+**Works, on the console.** Joined the Halo CE+ server on hardware and played
+Underground (ratrace@cex) at about 15 fps.
+
+- The console list asks `packs=1&players=32`: map pack games and servers of
+  up to 32 players show, as on the other consoles.
+- The GL layer's description is logged once, not before every draw: release
+  builds wrote it 2,449 times and the menus stalled on the SD card.
+- The game's tag byte swap swaps a model's shared index ranges once (game
+  #465): Halo CE+ maps share them between parts, and a range swapped twice
+  drew as stray triangles over the level.
+- Map pack maps past the 47 MB multiplayer cache files take a campaign map's,
+  as on the Xbox (game #466): Underground (67 MB) stopped with a dirty disc
+  error.
+- Known: a pink or purple tint on some effects (grenade smoke); a dark screen
+  at start after Close from the HOME Menu left the last exit unfinished
+  (power off fully to recover).
