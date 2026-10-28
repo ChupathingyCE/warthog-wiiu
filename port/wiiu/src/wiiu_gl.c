@@ -119,6 +119,15 @@ void GX2SetPixelSamplerBorderColor(uint32_t unit, float red, float green, float 
 GX2Init) */
 uint32_t GX2GetGPUTimeout(void);
 void GX2SetGPUTimeout(uint32_t milliseconds);
+/* (decaf's gx2_query.h: the GPU's clock written to memory when the top of
+its pipeline, or the bottom, reaches the command; and that clock in the
+CPU's OSTime ticks) */
+void GX2SampleTopGPUCycle(uint64_t *result);
+void GX2SampleBottomGPUCycle(uint64_t *result);
+uint64_t GX2GPUTimeToCPUTime(uint64_t time);
+
+/* the game's settings (port_config.c) */
+int config_boolean(const char *name);
 
 #define FIRST_USE() first_use(__func__)
 
@@ -146,7 +155,7 @@ never reads the file, so every switch stays off. */
 static struct
 {
 	int loaded;
-	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes, native_shorts, no_gpu_check, unaligned_vertices, copy_vertices, linear_textures, no_aniso, only_tex, gpu_check, log_shaders;
+	int log_draws, no_draws, no_cull, swap_winding, no_depth, no_blend, white_textures, log_frame, clear_red, blit_green, screen_magenta, trace, native_strips, no_mips, log_textures, log_big, dst_alpha_one, equal_as_lequal, skip_fog, packed_unsigned, math_cubes, cube_probe, native_cubes, native_shorts, no_gpu_check, unaligned_vertices, copy_vertices, linear_textures, no_aniso, only_tex, gpu_check, log_shaders, linear_targets;
 	unsigned int only_tex_format;
 	unsigned long log_at;
 	GLuint skip_programs[8];
@@ -169,8 +178,9 @@ static void debug_describe(void)
 		"draw: %s (gpu_check)", GPU_CHECK_FRAMES, debug.gpu_check ? "on" : "off");
 	wiiu_log("gl: vertex buffers on GX2_VERTEX_BUFFER_ALIGNMENT %s (unaligned_vertices), every attribute copied to the "
 		"ring %s (copy_vertices)", debug.unaligned_vertices ? "off" : "on", debug.copy_vertices ? "on" : "off");
-	wiiu_log("gl: textures given texels in GX2's tiling, through GX2CopySurface %s (linear_textures)",
-		debug.linear_textures ? "off" : "on");
+	wiiu_log("gl: textures given texels in GX2's tiling, through GX2CopySurface %s (linear_textures); render targets "
+		"in GX2's tiling %s (linear_targets)", debug.linear_textures ? "off" : "on",
+		debug.linear_textures || debug.linear_targets ? "off" : "on");
 	wiiu_log("gl: other switches to narrow a draw down (gl.txt, a word each): no_draws no_depth no_blend no_cull "
 		"white_textures only_tex_format=0xNN no_aniso no_mips skip_program=N; to log more: log_frame=N log_draws "
 		"log_textures log_shaders gpu_check");
@@ -228,6 +238,7 @@ static void debug_load(void)
 		if (!strcmp(word, "unaligned_vertices")) debug.unaligned_vertices = 1;
 		if (!strcmp(word, "copy_vertices")) debug.copy_vertices = 1;
 		if (!strcmp(word, "linear_textures")) debug.linear_textures = 1;
+		if (!strcmp(word, "linear_targets")) debug.linear_targets = 1;
 		if (!strcmp(word, "no_aniso")) debug.no_aniso = 1;
 		if (sscanf(word, "only_tex_format=%x", &debug.only_tex_format) == 1)
 			debug.only_tex = 1;
@@ -294,6 +305,10 @@ struct texture
 	unsigned long bytes;
 	int compressed;          /* 0, or DXT's bytes a block (8 or 16) */
 	int tiled;               /* GX2's own tiling: written through a copy */
+	/* drawn into and never given texels by the CPU: made again in GX2's
+	tiling at its first use as a framebuffer's color (texture_color_buffer) */
+	int tiled_target;
+	int cpu_written;         /* texels written in place by the CPU */
 	int depth_format;
 	GLint swizzle[4];
 	GLint base_level, max_level;
@@ -621,7 +636,7 @@ static struct
 	the longest's share of each (GPU waits, textures, shaders, the log's
 	SD card writes, the flip) */
 	OSTime base_gpu, base_texture, base_shader, base_log, base_flip;
-	OSTime longest_gpu, longest_texture, longest_shader, longest_log, longest_flip, period_log;
+	OSTime longest_gpu, longest_texture, longest_shader, longest_log, longest_flip, period_log, period_log_wait;
 	/* gpu_check's */
 	int checking, checked_frames, check_failed;
 	unsigned long checks;
@@ -635,6 +650,32 @@ static struct
 	OSThread *thread;
 	void *stack;
 } watch;
+
+/* debug.gpu_stats (the game's setting, off by default; the renderer logs
+its draw counts with it too, d3d8_gl.c): with each frame line, a frame's
+average split between the game's thread and the GPU, and this layer's share
+of the thread's time by part. Off, nothing is timed or counted. */
+static struct
+{
+	int on;
+	/* this layer's time on the game's thread: a draw's state, samplers and
+	uniforms (prepare_draw), its vertices (setup_vertices, the attributes
+	copied with it), strips and fans made lists, the indices read for the
+	vertices they reach */
+	OSTime prepare, vertices, lists, scans;
+	unsigned long draws, linear_target_draws, programs;
+	unsigned long long copied_bytes, list_indices, ring_bytes, uniform_bytes;
+	/* the GPU's clock at the top of each frame's first command and the
+	bottom of its last (GX2SampleTopGPUCycle, GX2SampleBottomGPUCycle), a
+	pair for each half of the ring, read once that frame is done */
+	uint64_t *cycles;
+	OSTime gpu;
+	unsigned long gpu_frames;
+	GLuint last_program;
+} stats;
+
+#define STATS_START(start) do { if (stats.on) (start) = OSGetSystemTime(); } while (0)
+#define STATS_ADD(total, start) do { if (stats.on) (total) += OSGetSystemTime() - (start); } while (0)
 
 static void watch_step(const char *step)
 {
@@ -753,6 +794,76 @@ static void gpu_check_frame_end(void)
 			watch.checks, gl.frame_draws, (unsigned long)OSTicksToMicroseconds(watch.longest_check));
 }
 
+/* debug.gpu_stats: read when the layer is ready; the GPU's clock pairs in
+memory of their own, each half's on a cache line of its own (the GPU writes
+one half's while the CPU clears the other's) */
+static void stats_start(void)
+{
+	stats.on = config_boolean("debug.gpu_stats");
+	if (!stats.on)
+		return;
+	stats.cycles = gpu_allocate(128, 64);
+	if (!stats.cycles)
+	{
+		stats.on = 0;
+		return;
+	}
+	memset(stats.cycles, 0, 128);
+	DCFlushRange(stats.cycles, 128);
+	GX2SampleTopGPUCycle(&stats.cycles[gl.frame_half * 8]);
+	wiiu_log("gl: debug.gpu_stats on: a frame's time split between the game's thread and the GPU, with each frame line");
+}
+
+/* (a frame's end, its half of the ring done with) the GPU's time for the
+frame in that half, and the next frame's start sampled into it */
+static void stats_frame_done(int half)
+{
+	uint64_t *pair = &stats.cycles[half * 8];
+
+	DCInvalidateRange(pair, 64);
+	if (pair[0] && pair[1] > pair[0])
+	{
+		stats.gpu += (OSTime)GX2GPUTimeToCPUTime(pair[1] - pair[0]);
+		stats.gpu_frames++;
+	}
+	pair[0] = pair[1] = 0;
+	DCFlushRange(pair, 64);
+	GX2SampleTopGPUCycle(&pair[0]);
+}
+
+static double stats_ms(OSTime ticks, unsigned long frames)
+{
+	return frames ? (double)OSTicksToMicroseconds(ticks) / 1000.0 / (double)frames : 0.0;
+}
+
+/* (with each frame line) a frame's average, and the counts begun again */
+static void stats_period_log(unsigned long frames, OSTime elapsed, OSTime flip, OSTime log_wait)
+{
+	OSTime waits = flip + watch.gpu_wait + watch.query_wait + log_wait;
+	OSTime working = elapsed > waits ? elapsed - waits : 0;
+	OSTime layer = stats.prepare + stats.vertices + stats.lists + stats.scans;
+	double count = frames ? (double)frames : 1.0;
+
+	wiiu_log("gl: stats: a frame on average: the game's thread working %.1f ms (in this layer's draws %.1f: state, "
+		"samplers and uniforms %.1f, vertices %.1f, strips and fans made lists %.1f, indices read for copies %.1f), "
+		"waiting %.1f ms (the flip %.1f, the GPU %.1f, queries %.1f, the log %.1f); the GPU %.1f ms from the frame's "
+		"first command to its last (%lu frames)", stats_ms(working, frames), stats_ms(layer, frames),
+		stats_ms(stats.prepare, frames), stats_ms(stats.vertices, frames), stats_ms(stats.lists, frames),
+		stats_ms(stats.scans, frames), stats_ms(waits, frames), stats_ms(flip, frames), stats_ms(watch.gpu_wait, frames),
+		stats_ms(watch.query_wait, frames), stats_ms(log_wait, frames), stats_ms(stats.gpu, stats.gpu_frames),
+		stats.gpu_frames);
+	wiiu_log("gl: stats: a frame on average: %.0f draws (%.0f into linear render targets), %.0f program changes, "
+		"%.1f KB of uniforms, %.1f KB of vertices copied, %.0f indices made lists, %.1f KB of draw data in the ring",
+		(double)stats.draws / count, (double)stats.linear_target_draws / count, (double)stats.programs / count,
+		(double)stats.uniform_bytes / 1024.0 / count, (double)stats.copied_bytes / 1024.0 / count,
+		(double)stats.list_indices / count, (double)stats.ring_bytes / 1024.0 / count);
+	stats.prepare = stats.vertices = stats.lists = stats.scans = 0;
+	stats.draws = stats.linear_target_draws = stats.programs = 0;
+	stats.copied_bytes = stats.list_indices = stats.ring_bytes = stats.uniform_bytes = 0;
+	stats.gpu = 0;
+	stats.gpu_frames = 0;
+}
+
 /* (every frame's end: a line every 2 s for the first 2 minutes, every
 300 frames after) */
 static void watch_frame_end(void)
@@ -760,7 +871,10 @@ static void watch_frame_end(void)
 	OSTime now = OSGetSystemTime();
 	OSTime vsync_wait = 0;
 	OSTime shader = watch.compile + watch.cache_read + watch.cache_write;
-	OSTime log_time = (OSTime)wiiu_log_write_ticks(), flip = wiiu_video_wait_ticks();
+	/* (the log's share is the time the game's thread waited for it: none
+while the log's writer thread takes the lines, wiiu_log.c) */
+	OSTime log_time = (OSTime)wiiu_log_wait_ticks(), log_writes = (OSTime)wiiu_log_write_ticks();
+	OSTime flip = wiiu_video_wait_ticks();
 	unsigned long vsync_timeouts = 0, elapsed;
 	unsigned long period_ms = OSTicksToMilliseconds(now - gl.start) < 120000 ? 2000 : 30000;
 
@@ -797,15 +911,18 @@ static void watch_frame_end(void)
 		(unsigned long)OSTicksToMilliseconds(watch.compile), watch.cache_reads,
 		(unsigned long)OSTicksToMilliseconds(watch.cache_read), watch.cache_writes,
 		(unsigned long)OSTicksToMilliseconds(watch.cache_write));
-	wiiu_log("gl:   the longest frame: GPU waits %lu ms, textures %lu ms, shaders %lu ms, the log %lu ms, the flip %lu "
+	wiiu_log("gl:   the longest frame: GPU waits %lu ms, textures %lu ms, shaders %lu ms, waiting for the log %lu ms, the flip %lu "
 		"ms; in all: %lu textures given texels in %lu ms (%lu written in place waited for the GPU), the log's SD card "
 		"writes %lu ms",
 		(unsigned long)OSTicksToMilliseconds(watch.longest_gpu), (unsigned long)OSTicksToMilliseconds(watch.longest_texture),
 		(unsigned long)OSTicksToMilliseconds(watch.longest_shader), (unsigned long)OSTicksToMilliseconds(watch.longest_log),
 		(unsigned long)OSTicksToMilliseconds(watch.longest_flip), watch.textures,
 		(unsigned long)OSTicksToMilliseconds(watch.texture_time), watch.texture_waits,
-		(unsigned long)OSTicksToMilliseconds(log_time - watch.period_log));
-	watch.period_log = log_time;
+		(unsigned long)OSTicksToMilliseconds(log_writes - watch.period_log));
+	if (stats.on)
+		stats_period_log(watch.frames, now - watch.period_start, vsync_wait, log_time - watch.period_log_wait);
+	watch.period_log = log_writes;
+	watch.period_log_wait = log_time;
 	watch.textures = watch.texture_waits = 0;
 	watch.texture_time = 0;
 	watch.base_texture = 0;
@@ -975,6 +1092,8 @@ static void *ring_reserve(unsigned long size)
 			return NULL;
 	}
 	gl.ring_offset = aligned + size;
+	if (stats.on)
+		stats.ring_bytes += size;
 	return gl.ring + aligned;
 }
 
@@ -1187,7 +1306,7 @@ static int texture_allocate(struct texture *texture, GLenum target, GLenum inter
 	and the levels below the first are only ever tiled there. Textures made
 	empty, to be drawn into or written a part at a time, stay linear.) */
 	texture->tiled = target == GL_TEXTURE_CUBE_MAP || target == GL_TEXTURE_3D ||
-		(!debug.linear_textures && (compressed || given_texels));
+		(!debug.linear_textures && (compressed || given_texels || texture->tiled_target));
 	surface->tileMode = texture->tiled ? GX2_TILE_MODE_DEFAULT : GX2_TILE_MODE_LINEAR_ALIGNED;
 	GX2CalcSurfaceSizeAndAlignment(surface);
 	/* (level 1 is mipLevelOffset[0] after the image when the levels follow
@@ -1499,6 +1618,7 @@ static void texture_upload(struct texture *texture, GLenum target, int level, un
 		return;
 	}
 	texture_wait_unused(texture);
+	texture->cpu_written = 1;
 	base = texture_level(texture, level, &pitch, &slice_bytes);
 	for (slice = 0; slice < (depth ? depth : 1); slice++)
 	{
@@ -1616,6 +1736,7 @@ static void generate_mipmaps(struct texture *texture)
 	}
 	else
 		texture_wait_unused(texture);
+	texture->cpu_written = 1;
 	for (level = 1; level < texture->levels; level++)
 	{
 		unsigned long width = level_size(texture->width, level), height = level_size(texture->height, level);
@@ -1664,6 +1785,29 @@ static GX2ColorBuffer *texture_color_buffer(struct texture *texture, int level)
 		return NULL;
 	if (texture->color_buffers[level])
 		return texture->color_buffers[level];
+	/* (a render target, made empty with one level in use, as the renderer's
+	are, d3d8_gl.c's render_target_get: drawn into in GX2's tiling, as games'
+	color buffers are, not linear. A linear color buffer is written a row at a
+	time where a tiled one is written a tile at a time; the screen's own color
+	buffer is tiled (wiiu_video.c). Its texels are only the GPU's, so it is
+	made again as it is, empty; a texture the CPU wrote stays linear) */
+	if (!texture->tiled && !texture->cpu_written && !texture->tiled_target && level == 0 &&
+		texture->target == GL_TEXTURE_2D && texture->max_level == 0 && !debug.linear_textures && !debug.linear_targets)
+	{
+		GLenum internal = texture->internal_format;
+		unsigned long width = texture->width, height = texture->height;
+		int defined = texture->defined_levels;
+		static int logged;
+
+		texture_release(texture);
+		texture->tiled_target = 1;
+		if (!texture_allocate(texture, GL_TEXTURE_2D, internal, width, height, 1, 0))
+			return NULL;
+		texture->defined_levels = defined;
+		if (logged++ < 8)
+			wiiu_log("gl: render target %lux%lu (format 0x%x) in GX2's tiling", width, height,
+				(unsigned int)texture->gx2.surface.format);
+	}
 	buffer = calloc(1, sizeof(*buffer));
 	if (!buffer)
 		return NULL;
@@ -2450,11 +2594,19 @@ static void program_upload(struct program *program)
 			if (uniform->sampler)
 				continue;
 			if (uniform->vertex_offset >= 0 && uniform->vertex_offset + size <= UNIFORM_COMPONENTS)
+			{
 				GX2SetVertexUniformReg((uint32_t)uniform->vertex_offset, (uint32_t)size,
 					program->vertex_values + uniform->vertex_offset);
+				if (stats.on)
+					stats.uniform_bytes += (unsigned long long)size * 4;
+			}
 			if (uniform->pixel_offset >= 0 && uniform->pixel_offset + size <= UNIFORM_COMPONENTS)
+			{
 				GX2SetPixelUniformReg((uint32_t)uniform->pixel_offset, (uint32_t)size,
 					program->pixel_values + uniform->pixel_offset);
+				if (stats.on)
+					stats.uniform_bytes += (unsigned long long)size * 4;
+			}
 		}
 		gl.uploaded_program = gl.program;
 	}
@@ -2471,6 +2623,8 @@ static void program_upload(struct program *program)
 				GX2SetPixelUniformReg((uint32_t)low, (uint32_t)(high - low), program->pixel_values + low);
 			else
 				GX2SetVertexUniformReg((uint32_t)low, (uint32_t)(high - low), program->vertex_values + low);
+			if (stats.on)
+				stats.uniform_bytes += (unsigned long long)(high - low) * 4;
 		}
 	}
 	program->vertex_dirty_low = program->pixel_dirty_low = UNIFORM_COMPONENTS;
@@ -3136,6 +3290,8 @@ static int setup_vertices(long base_vertex)
 						memcpy(copy + vertex_index * slot, buffer->data + source, element_bytes);
 				}
 				gpu_written(copy, slot * draw_vertex_end, GX2_INVALIDATE_MODE_CPU_ATTRIBUTE_BUFFER);
+				if (stats.on)
+					stats.copied_bytes += (unsigned long long)slot * draw_vertex_end;
 				attribute_buffer_set(buffer_count, slot * draw_vertex_end, slot, copy);
 				stream->buffer = (uint32_t)buffer_count++;
 				stream->offset = (uint32_t)draw_record.slack[stream->buffer];
@@ -3392,9 +3548,16 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 	GX2PrimitiveMode primitive;
 	const unsigned char *source = NULL;
 	unsigned long index_bytes = index_type == GL_UNSIGNED_INT ? 4 : 2;
+	OSTime start = 0;
+	int prepared;
 
 	debug_load();
-	if (debug.no_draws || !count || !prepare_draw())
+	if (debug.no_draws || !count)
+		return;
+	STATS_START(start);
+	prepared = prepare_draw();
+	STATS_ADD(stats.prepare, start);
+	if (!prepared)
 		return;
 	primitive = primitive_mode(mode, &count);
 	if (!count)
@@ -3412,6 +3575,7 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 		{
 			unsigned long index;
 
+			STATS_START(start);
 			for (index = 0; index < count; index++)
 			{
 				unsigned long value = index_bytes == 4 ? ((const uint32_t *)source)[index] :
@@ -3420,6 +3584,7 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 				if (value + 1 > draw_vertex_end)
 					draw_vertex_end = value + 1;
 			}
+			STATS_ADD(stats.scans, start);
 		}
 	}
 	else
@@ -3427,7 +3592,10 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 		draw_vertex_end = first + count;
 		base_vertex = 0;
 	}
-	if (!setup_vertices(base_vertex))
+	STATS_START(start);
+	prepared = setup_vertices(base_vertex);
+	STATS_ADD(stats.vertices, start);
+	if (!prepared)
 		return;
 	if (primitive == GX2_PRIMITIVE_MODE_TRIANGLE_FAN ||
 		(!debug.native_strips && primitive == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP))
@@ -3437,10 +3605,14 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 
 		if (count < 3)
 			return;
+		STATS_START(start);
 		list = fan_as_list(first, count, source, index_bytes, &list_count, &list_bytes,
 			primitive == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP);
+		STATS_ADD(stats.lists, start);
 		if (!list)
 			return;
+		if (stats.on)
+			stats.list_indices += list_count;
 		source = list;
 		count = list_count;
 		index_bytes = list_bytes;
@@ -3478,6 +3650,15 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 		GX2DrawEx(primitive, (uint32_t)count, (uint32_t)first, 1);
 	gl.draws++;
 	gl.frame_draws++;
+	if (stats.on)
+	{
+		stats.draws++;
+		if (gl.target_texture && !gl.target_texture->tiled)
+			stats.linear_target_draws++;
+		if (gl.program != stats.last_program)
+			stats.programs++;
+		stats.last_program = gl.program;
+	}
 	targets_written();
 	{
 		struct program *program = object_get(gl.program, _object_program);
@@ -3629,6 +3810,7 @@ static int gl_ready(void)
 	wiiu_log("gl: ready on GX2 (ring %u MB, GX2's GPU timeout %u ms)", RING_SIZE >> 20, (unsigned int)GX2GetGPUTimeout());
 	/* (the switches in the log from the start) */
 	debug_load();
+	stats_start();
 	watch_step("the game's own work");
 	watch_start();
 	return 1;
@@ -5132,11 +5314,15 @@ void wiiu_gl_frame_end(void)
 	gpu_check("copy to the screens and swap");
 	gpu_check_frame_end();
 	watch_step("the frame's end");
+	if (stats.on)
+		GX2SampleBottomGPUCycle(&stats.cycles[gl.frame_half * 8 + 1]);
 	GX2Flush();
 	gl.frame_stamps[gl.frame_half] = GX2GetLastSubmittedTimeStamp();
 	gl.frame_half ^= 1;
 	if (gl.frame_stamps[gl.frame_half])
 		gpu_wait(gl.frame_stamps[gl.frame_half], "the GPU let finish the frame before last");
+	if (stats.on)
+		stats_frame_done(gl.frame_half);
 	retired_free(gl.frame_half);
 	gl.ring_offset = (unsigned long)gl.frame_half * (RING_SIZE / 2);
 	/* (the next frame binds its own) */
