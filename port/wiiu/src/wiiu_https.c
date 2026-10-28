@@ -40,6 +40,11 @@ The log names the host and what went wrong, never an address.
 void delta_legacy_start(void);
 int delta_legacy_refresh(void);
 
+/* (port/linux/src/port_config.h) */
+void config_folder(char *path, size_t size);
+/* the newest pin document's file (console_https.h's pins_path) */
+static char pins_path[300];
+
 /* Winsock's codes, as posix_socket_last_error gives them (wiiu_net.c) */
 #define WSAEWOULDBLOCK 10035
 #define WSAEINPROGRESS 10036
@@ -205,10 +210,13 @@ static void https_log(const char *text)
 	wiiu_log("%s", text);
 }
 
-static const struct console_https_port wiiu_https_port =
+static struct console_https_port wiiu_https_port =
 {
 	https_connect, https_send, https_receive, https_close, https_random, https_milliseconds,
 	https_lock, https_unlock, https_log, "WarthogWiiU/1",
+	/* (the pin document: plain HTTP from the list's host, wiiu_online.c;
+	where it is kept is set at the start) */
+	wiiu_online_plain_get, NULL,
 };
 
 void wiiu_https_start(void)
@@ -220,6 +228,10 @@ void wiiu_https_start(void)
 	if (!__atomic_compare_exchange_n(&started, &expected, 1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
 		return;
 	OSInitMutex(&https_mutex);
+	/* (the newest pin document, beside config.toml) */
+	config_folder(pins_path, sizeof(pins_path) - 32);
+	strcat(pins_path, "console_pins.signed");
+	wiiu_https_port.pins_path = pins_path;
 	console_https_initialize(&wiiu_https_port);
 }
 
