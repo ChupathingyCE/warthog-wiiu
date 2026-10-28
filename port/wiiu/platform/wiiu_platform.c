@@ -28,6 +28,9 @@ port's OpenGL on GX2 (port/wiiu/src/wiiu_gl.c and wiiu_video.c).
 
 BOOL platform_sdl_initialize(void)
 {
+	/* (the signed legacy table's cache, and the network rules told of it,
+	as sdl_platform.c's platform_sdl_initialize starts it: once) */
+	wiiu_https_table_start();
 	return TRUE;
 }
 

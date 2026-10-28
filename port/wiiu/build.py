@@ -13,7 +13,9 @@ It is the Linux build's arrangement (the game's tools/linux_build.py) on the
 console: the game's sources (port/linux/port.json), the port's game units
 (port/linux/game), the desktop platform layer (port/linux/src) less what the
 console does its own way, the third-party libraries the platform layer uses,
-and port/wiiu/src. The game and the platform layer see the Xbox SDK
+and port/wiiu/src, with the game's shared HTTPS client and Mbed TLS
+(port/console/https, the game's docs/console-https.md). The game and the
+platform layer see the Xbox SDK
 declarations of the game's port/include/xdk, and SDL's headers (downloaded
 once, as the dedicated server's build does: its OpenGL declarations and
 types; the functions the platform layer calls are the port's,
@@ -26,7 +28,7 @@ import shlex
 from pathlib import Path
 from typing import Any, List, Optional
 
-from tools.console_build import ConsolePort, console_defines
+from tools.console_build import ConsolePort, console_defines, console_https_flags, console_https_sources
 from tools.ninja_syntax import Writer
 from tools.version import version
 
@@ -128,6 +130,11 @@ PLATFORM_FLAGS = [
     "-Werror=implicit-function-declaration",
 ]
 
+# the platform layer's units that call the shared HTTPS client: the signed
+# legacy table's fetch (delta.c, on the list's thread: src/wiiu_https.c) and
+# its kill switch (delta_peer_game.c)
+HTTPS_PLATFORM_SOURCES = {"delta.c", "delta_peer_game.c"}
+
 # port/wiiu/src/wiiu_*.c: the console through wut, warnings on (on this
 # big-endian ABI a pointer or integer mismatch is a real bug)
 CONSOLE_FLAGS = [
@@ -159,8 +166,8 @@ REPLACED_PLATFORM_SOURCES = {
     "posix_update.c",
     "updater.c",
     "update_signature.c",
-    # UPnP and the desktop game browser's HTTPS (the console's Online Games
-    # come later)
+    # UPnP and the desktop game browser's HTTPS (the console's list and the
+    # signed legacy table go over port/console/https: src/wiiu_https.c)
     "posix_upnp.c",
     "posix_browser.c",
 }
@@ -455,10 +462,16 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
         f"-I{_quote(game / STB_DIR)}",
         f"-I{_quote(wut / 'include')}",
     ])
+    https_defines = " ".join(["-DHALO_CONSOLE_HTTPS", *console_https_flags(game)])
     for source in sorted((game / LINUX_SRC).glob("*.c")):
         if source.name in REPLACED_PLATFORM_SOURCES:
             continue
-        add_object(source, posix_cflags if source.name.startswith("posix_") else platform_cflags)
+        if source.name.startswith("posix_"):
+            add_object(source, posix_cflags)
+        elif source.name in HTTPS_PLATFORM_SOURCES:
+            add_object(source, f"{platform_cflags} {https_defines}")
+        else:
+            add_object(source, platform_cflags)
     add_object(hud_assets, platform_cflags)
     # the port's units in the platform layer's terms (the Xbox SDK's
     # declarations): its window, input and the rest of sdl_platform.h
@@ -489,6 +502,11 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
 
     # the third-party libraries, with the platform layer's ABI
     third_party = " ".join([abi, "-std=gnu11", "-w"])
+    # HTTPS: the game's shared client and Mbed TLS with the consoles'
+    # configuration (the game's docs/console-https.md), built for size
+    https_cflags = " ".join([target, *defines, "-std=gnu11", "-w", "-Os", *console_https_flags(game)])
+    for source in console_https_sources():
+        add_object(game / source, https_cflags)
     add_object(game / TOML_DIR / "tomlc17.c", third_party)
     for name in EXPAT_SOURCES:
         add_object(game / EXPAT_DIR / name, f"{third_party} -I{_quote(game / EXPAT_DIR)}")
