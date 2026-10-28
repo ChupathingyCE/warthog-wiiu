@@ -41,6 +41,7 @@ struct exit_file
 {
 	FSAClientHandle client;
 	FSAFileHandle file;
+	int added;
 	int open;
 	uint8_t buffer[FSA_LINE] __attribute__((aligned(FSA_LINE)));
 };
@@ -48,6 +49,7 @@ struct exit_file
 static struct exit_file notes __attribute__((aligned(FSA_LINE)));
 static struct exit_file beats __attribute__((aligned(FSA_LINE)));
 static OSThread beat_thread;
+static int beat_started;
 static uint8_t beat_stack[BEAT_STACK] __attribute__((aligned(16)));
 static volatile const char *volatile phase = "before the end";
 static volatile int beat_stop;
@@ -65,10 +67,23 @@ static void file_open(struct exit_file *target, const char *path, const char *mo
 {
 	FSAInit();
 	target->client = FSAAddClient(NULL);
-	if (target->client < 0)
+	if (target->client <= 0)
 		return;
+	target->added = 1;
 	if (FSAOpenFileEx(target->client, path, mode, 0x660, FS_OPEN_FLAG_NONE, 0, &target->file) == FS_ERROR_OK)
 		target->open = 1;
+}
+
+/* the file closed and its client deleted, as wut's own FSA device is let
+go (devoptab_fsa.cpp's __fini_wut_devoptab: FSADelClient) */
+static void file_close(struct exit_file *target)
+{
+	if (target->open)
+		FSACloseFile(target->client, target->file);
+	target->open = 0;
+	if (target->added)
+		FSADelClient(target->client);
+	target->added = 0;
 }
 
 /* (no C library: the line is put together by hand, safe on any thread
@@ -211,12 +226,48 @@ void wiiu_exit_phase(const char *text)
 	note(text, 0, 0, 0);
 }
 
+/* The trace's own thread and files let go before coreinit's exit: none of
+the references (SDL's Wii U port, libwhb, Butter and Jelly) reach the
+system's exit with a thread of their own still running or an FSA client
+still open, and the beat thread was left writing to the SD card through
+it. Stopped as Butter and Jelly stops its threads: asked, then joined
+(docs/exit.md), here with a second's limit. */
+static void trace_stop(void)
+{
+	int waited = 0;
+
+	if (beat_started)
+	{
+		beat_stop = 1;
+		while (!OSIsThreadTerminated(&beat_thread) && waited < 1000)
+		{
+			OSSleepTicks(OSMillisecondsToTicks(10));
+			waited += 10;
+		}
+		if (OSIsThreadTerminated(&beat_thread))
+		{
+			OSJoinThread(&beat_thread, NULL);
+			beat_started = 0;
+			note("the beat thread stopped", 0, 0, 0);
+		}
+		else
+			note("the beat thread still running, ms waited:", 1, (uint32_t)waited, 0);
+	}
+	note("the trace's files closed next", 0, 0, 0);
+	/* (the beats' file only once its writer has stopped) */
+	if (!beat_started)
+		file_close(&beats);
+	file_close(&notes);
+}
+
 static void coreinit_exit_traced(int code)
 {
 	wiiu_exit_phase("coreinit's exit next");
+	trace_stop();
+	/* (the files closed: OSReport only from here) */
 	if (coreinit_exit)
 		coreinit_exit(code);
-	wiiu_exit_phase("coreinit's exit returned");
+	OSReport("exit: coreinit's exit returned\n");
 	for (;;)
 		OSSleepTicks(OSMillisecondsToTicks(1000));
 }
@@ -244,6 +295,7 @@ void wiiu_exit_begin(void)
 	{
 		OSSetThreadName(&beat_thread, "exit beat");
 		OSResumeThread(&beat_thread);
+		beat_started = 1;
 	}
 }
 

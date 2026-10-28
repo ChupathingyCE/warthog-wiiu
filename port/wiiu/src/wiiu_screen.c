@@ -112,11 +112,14 @@ void wiiu_screen_update(void)
 	}
 }
 
+/* (OSScreen shut down only while the game has the screens, as
+WHBLogConsoleFree does: at Close in the HOME button menu the menu has them) */
 void wiiu_screen_stop(void)
 {
 	if (screen_state == 1)
 	{
-		OSScreenShutdown();
+		if (!screen_released)
+			OSScreenShutdown();
 		MEMFreeToDefaultHeap(buffers[0]);
 		MEMFreeToDefaultHeap(buffers[1]);
 	}

@@ -21,8 +21,9 @@ src/audio/wiiu/SDL_wiiuaudio.c, zlib-licensed):
   thread on core 1 when the caller is on another).
 
 AX itself is started with ProcUI (the Wii U Menu's music stops with it) and
-stopped when the HOME button menu takes the foreground: the voices go with
-it and are made again when AX starts again.
+stopped only at the game's end, as SDL quits AX only when its device closes
+(AXQuit when the HOME button menu took the foreground hung that menu on the
+console): wiiu_audio_shutdown.
 */
 
 #include <malloc.h>
@@ -297,22 +298,44 @@ static int audio_thread(int argument, const char **unused)
 	return 0;
 }
 
-static void audio_thread_stop(void)
+/* the filling thread asked to stop and waited for, as SDL's
+close_audio_device does (src/audio/SDL_audio.c: the device's shutdown set,
+then SDL_WaitThread) before the driver's CloseDevice frees the voices. It
+looks every 3 ms, and a fill takes about 20 ms, so the wait gives up after a
+second: a thread still running then is named in the log and its buffers
+kept. 1 once it has ended */
+#define AUDIO_THREAD_WAIT 1000
+
+static int audio_thread_stop(void)
 {
-	int result;
+	int result, waited = 0;
 
 	if (!audio.thread)
-		return;
+		return 1;
 	audio.thread_running = 0;
+	while (!OSIsThreadTerminated(audio.thread) && waited < AUDIO_THREAD_WAIT)
+	{
+		OSSleepTicks(OSMillisecondsToTicks(5));
+		waited += 5;
+	}
+	if (!OSIsThreadTerminated(audio.thread))
+	{
+		wiiu_log("audio: the filling thread still running after %d ms", waited);
+		return 0;
+	}
+	/* (the deallocator frees its memory once it is joined) */
 	OSJoinThread(audio.thread, &result);
 	audio.thread = NULL;
+	audio.thread_stack = NULL;
+	wiiu_log("audio: the filling thread stopped");
+	return 1;
 }
 
 /* AX is the application's to start: until it is, the Wii U Menu's own sound
 keeps playing under the game. The 48 kHz renderer and the single-stage
-pipeline, as wut's samples and SDL's Wii U audio do. It is let go when the
-HOME button menu takes the foreground and started again on return, with
-the voices of a stream that is open. */
+pipeline, as wut's samples and SDL's Wii U audio do. It runs on through
+the HOME button menu and is stopped at the game's end (wiiu_audio_shutdown);
+the voices of a stream that is open are made when it starts. */
 void wiiu_audio_startup(void)
 {
 	AXInitParams parameters = { .renderer = AX_INIT_RENDERER_48KHZ, .pipeline = AX_INIT_PIPELINE_SINGLE };
@@ -325,13 +348,71 @@ void wiiu_audio_startup(void)
 		wiiu_log("audio: the voices could not be made again");
 }
 
-void wiiu_audio_shutdown(void)
+/* the voices freed and AX stopped (SDL's WIIUAUDIO_CloseDevice), on AX's
+core: SDL's WIIUAUDIO_OpenDevice says AX's functions are to be called from
+it, and runs them on a thread there when the caller is elsewhere */
+static int audio_ax_quit(int argument, const char **unused)
 {
-	if (!AXIsInit())
-		return;
+	(void)argument;
+	(void)unused;
 	audio_voices_free();
 	AXQuit();
+	return 0;
+}
+
+static void audio_ax_quit_on_core(void)
+{
+	OSThread *thread;
+	uint32_t stack_size = 32 * 1024;
+	unsigned char *stack;
+	int result;
+
+	if (OSGetThreadAffinity(OSGetCurrentThread()) == AUDIO_AX_AFFINITY)
+	{
+		audio_ax_quit(0, NULL);
+		return;
+	}
+	thread = memalign(16, sizeof(*thread));
+	stack = memalign(16, stack_size);
+	if (!thread || !stack ||
+		!OSCreateThread(thread, audio_ax_quit, 0, NULL, stack + stack_size, stack_size,
+		OSGetThreadPriority(OSGetCurrentThread()), AUDIO_AX_AFFINITY))
+	{
+		free(thread);
+		free(stack);
+		audio_ax_quit(0, NULL);
+		return;
+	}
+	OSSetThreadDeallocator(thread, thread_deallocate);
+	OSResumeThread(thread);
+	OSJoinThread(thread, &result);
+}
+
+/* The game's end (proc_end), in the order of SDL's close_audio_device: the
+filling thread stopped and joined first, then the voices freed and AX
+stopped, then the buffers let go (SDL's WIIUAUDIO_CloseDevice). The thread
+was left running before this, into wut's __fini_wut, which frees the
+memory its stack and control block are in. */
+void wiiu_audio_shutdown(void)
+{
+	int stopped;
+
+	if (!AXIsInit())
+		return;
+	wiiu_log("audio: stopping");
+	wiiu_log_flush();
+	stopped = audio_thread_stop();
+	wiiu_log_flush();
+	audio_ax_quit_on_core();
 	wiiu_log("audio: AX stopped");
+	if (stopped && audio.open)
+	{
+		free(audio.buffer_memory);
+		free(audio.interleaved);
+		audio.buffer_memory = NULL;
+		audio.interleaved = NULL;
+		audio.open = 0;
+	}
 }
 
 int wiiu_audio_open(int rate, wiiu_audio_fill fill, void *context)
