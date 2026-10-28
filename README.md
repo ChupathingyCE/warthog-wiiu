@@ -66,9 +66,14 @@ You need devkitPro's devkitPPC and wut (`/opt/devkitpro`, or pass
 `--devkitppc DIR` and `--wut DIR`). Then:
 
 ```sh
-python3 chupathingyce/configure.py --console-port port/wiiu
+python3 chupathingyce/configure.py --console-port port/wiiu --console-no-debug-asserts
 ninja wiiu
 ```
+
+`--console-no-debug-asserts` is the build testers get, faster on the
+console: the debug decomp's asserts are compiled out, as the retail game had
+them, except the memory checks. Leave it out for a build that stops at the
+first failed assert.
 
 This is the game's console-port build; see "Console ports" in the game's
 [docs/building.md](https://github.com/ChupathingyCE/chupathingyce/blob/main/docs/building.md).
