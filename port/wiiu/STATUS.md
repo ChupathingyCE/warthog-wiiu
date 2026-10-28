@@ -80,7 +80,7 @@ code behind an `if (count)` runs with a count of 0. With
 `--force-interpreter` the same build runs on. Real hardware is the
 reference; Cemu runs are interpreter runs for now.
 
-**First hardware run** (the owner's console, before these fixes): booted,
+**First hardware run** (a test console, before these fixes): booted,
 took the 256 MB window, wrote its settings, and stopped at the cache file
 setup (the seek past the end above), then at the renderer's missing device.
 
@@ -152,7 +152,7 @@ Bring-up switches (`--wiiu-gl-switches` at configure, then words in
 `blit_green`, `math_cubes`, and the four above. A logged frame also writes
 each program's GLSL beside the log (`p<program>.vert`, `.frag`).
 
-Screenshots: the owner's `showcase/wiiu-night/` (`*-mainmenu-cached-shaders`,
+Screenshots: captures from the first hardware run (`*-mainmenu-cached-shaders`,
 `*-bloodgulch-correct`, and `*-reference-macos-bloodgulch` from the macOS
 build at the same spawn).
 
@@ -296,7 +296,7 @@ the rest as nothing bound), `no_aniso`.
 ## The textured main menu on the console (2026-10-22)
 
 **Seen on the console.** With the tiled textures the main menu is drawn,
-textured, at 60 fps, and the GamePad moves through it. The owner: a slight
+textured, at 60 fps, and the GamePad moves through it. A tester noted a slight
 delay, and an occasional blink when moving through the menus. The log: 120
 frames every 2 s, but frames of 90 to 540 ms while moving through the menus
 (no GPU wait or shader behind them), and 1 to 1.5 s of every 2 s spent
