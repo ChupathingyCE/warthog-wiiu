@@ -42,7 +42,7 @@ jobs:
       - name: Install the build tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends python3 ninja-build ccache git zip unzip curl xz-utils ca-certificates
+          apt-get install -y --no-install-recommends python3 ninja-build ccache git zip unzip curl xz-utils ca-certificates gcc libc6-dev
 
       # Prove the image has what the build links against, and say which is
       # missing if it does not. Better a clear message now than a link error
@@ -92,6 +92,10 @@ jobs:
           path: .ccache
           key: ccache-wiiu-${{ github.sha }}
           restore-keys: ccache-wiiu-
+
+      # (the host's compiler: which hosts the console joins)
+      - name: Host tests
+        run: CC=gcc sh port/wiiu/tests/run.sh
 
       - name: Configure
         run: python3 chupathingyce/configure.py --console-port port/wiiu --cafeglsl /opt/cafeglsl --compiler-launcher ccache
