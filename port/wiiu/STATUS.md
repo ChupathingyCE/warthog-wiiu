@@ -487,4 +487,6 @@ Underground (ratrace@cex) at about 15 fps.
   error.
 - Known: a pink or purple tint on some effects (grenade smoke); a dark screen
   at start after Close from the HOME Menu left the last exit unfinished
-  (power off fully to recover).
+  (power off fully to recover). The end now stops the sound's thread and
+  the exit trace's before the system's exit, as SDL's Wii U port does
+  (docs/exit.md); not yet tested on the console.

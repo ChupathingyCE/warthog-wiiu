@@ -163,3 +163,31 @@ If the Wii U Menu still waits after this, the next port.txt shows which
 threads were left running, how the exit went past `proc_end` (each
 `__fini_wut` step, coreinit's `exit`), and the beat file shows whether the
 process was still running after that.
+
+## Close from the HOME button menu (2026-10-28)
+
+On the console, Close from the HOME button menu hung in the end (around
+the sound's shutdown and `__fini_wut`), and the next start showed a dark
+screen until the console was powered off. Three things still ran or were
+still open at the system's exit that none of the references leave:
+
+- The sound's filling thread ("Chupathingy audio") was never stopped:
+  `wiiu_audio_shutdown` freed the voices and called `AXQuit` with it still
+  running, and it ran on into `__fini_wut`, which frees its stack.
+  SDL's `close_audio_device` (src/audio/SDL_audio.c, wiiu-sdl2-2.28) sets
+  the device's shutdown and joins its thread (`SDL_WaitThread`) before the
+  Wii U driver's `WIIUAUDIO_CloseDevice` frees the voices and quits AX. The
+  port now does the same, in that order, with AX's calls on AX's core (as
+  SDL's `WIIUAUDIO_OpenDevice` says AX's functions need), and frees the
+  buffers after.
+- The exit trace's own beat thread kept writing to the SD card through an
+  FSA client of its own into coreinit's exit, and neither trace file was
+  closed nor its client deleted. It is now asked to stop and joined, and
+  both files closed and their clients deleted (as wut's
+  `__fini_wut_devoptab` deletes its client), just before coreinit's exit.
+- OSScreen was shut down at the end even when the HOME button menu had the
+  screens. `WHBLogConsoleFree` (libwhb `console.c`) shuts it down only
+  while the application has the foreground; the port now does too.
+
+To be tested on the console: HOME, then Close, then start the game again
+(the screen must not be dark); and HOME, then back to the game.
