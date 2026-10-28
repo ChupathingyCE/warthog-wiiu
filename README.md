@@ -27,6 +27,15 @@ consoles. Get it from the
 4. Start Chupathingy from the Wii U Menu. The GamePad and the Pro Controller
    work: A accepts, B goes back.
 
+## Link your Delta profile
+
+On Online Games, press + (Start) to open DELTA PROFILE, then A for a code.
+Enter it at stats.chupathingy.org/connect, signed in on your phone or
+computer (or scan the QR code), then press A on the Wii U to confirm. Your
+games then count toward your profile. The Wii U makes its own key for this
+(`wiiu/apps/halo/delta_device.key` on the SD card); nothing secret is sent.
+Keep that file to yourself. Unlink on the site's profile page.
+
 ## Known issues
 
 - Online matches run at about 15 fps (frame pacing); this is being worked on.
