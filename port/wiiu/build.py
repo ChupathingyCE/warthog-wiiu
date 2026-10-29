@@ -66,6 +66,10 @@ TARGET_FLAGS = [
     "-DHALO_CONSOLE",
     "-DHALO_WIIU_CONSOLE",
     "-DHALO_BIG_ENDIAN",
+    # Delta Peer as a client, as the original Xbox and the Xbox 360 have it
+    # (the game's port/linux/src/delta_peer_game.c): the console joins a
+    # Delta host by its wire and range, whatever OpenCE number it announces
+    "-DHALO_CONSOLE_DELTA",
     # the menus' map list and the Xbox map packs (maps_<pack>: Halo CE+), as
     # the original Xbox, the Xbox 360 and the desktop builds have them (the
     # game's port/linux/game/ui_map_list.c, map_packs.c)

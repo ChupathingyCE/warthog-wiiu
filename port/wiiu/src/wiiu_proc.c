@@ -47,6 +47,9 @@ static void proc_end(void)
 	wiiu_exit_begin();
 	wiiu_exit_phase("proc_end: begun");
 	wiiu_log("system: the game ended");
+	/* (every line from here written as it comes, the writer thread
+	stopped first: docs/exit.md) */
+	wiiu_log_stop_writer();
 	wiiu_log_flush();
 	wiiu_exit_phase("proc_end: the platform layer's threads to stop");
 	thread_stop_all(PROC_THREADS_WAIT);
@@ -142,6 +145,7 @@ static void proc_initialize(void)
 	proc_ready = 1;
 	atexit(proc_end);
 	wiiu_log("system: ProcUI ready");
+	wiiu_log_start_writer();
 	/* (the network's self-test and the console game list, on a thread of
 	their own: wiiu_online.c) */
 	wiiu_online_start();
