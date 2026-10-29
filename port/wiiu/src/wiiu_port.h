@@ -87,6 +87,22 @@ int wiiu_network_start(void);
 of their own (wiiu_online.c, wiiu_game_list.h) */
 void wiiu_online_start(void);
 
+/* HTTPS (wiiu_https.c): the game's shared client set up (once the network
+is up; any thread, once); the signed legacy table's cache read and the
+game's network rules told of it (the game's start, once:
+platform_sdl_initialize, platform/wiiu_platform.c); and the table fetched
+again when it is due (at the first call, then every 4 hours, or 30 minutes
+after a failure), blocking, on a thread with CONSOLE_HTTPS_STACK_SIZE and
+DELTA_REFRESH_STACK_SIZE to spare */
+void wiiu_https_start(void);
+/* one plain HTTP GET of host's path on port 80, the whole response into
+response (wiiu_online.c, as the plain list asks): 1 if one came. The HTTPS
+client's plain_get, for the signed pin document */
+int wiiu_online_plain_get(const char *host, const char *path, char *response, unsigned long size,
+	unsigned long *received, unsigned long timeout_ms);
+void wiiu_https_table_start(void);
+void wiiu_https_table_refresh(void);
+
 /* the controllers (wiiu_pad.c): the GamePad, then the Wii Remotes' Pro and
 Classic Controllers, in the game's four ports, as the Xbox's gamepad state
 (buttons as XINPUT_GAMEPAD's digital bits, analog buttons and sticks) */

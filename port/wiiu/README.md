@@ -24,7 +24,8 @@ Cemu, then Aroma on a console (`sd:/wiiu/apps/halo/`).
 ## Online
 
 At start-up a self-test logs `net test:` lines to `port.txt` (the byte
-order, the network, UDP, DNS, the console game list over plain HTTP); the
+order, the network, UDP, the console game list over HTTPS from
+stats.chupathingy.org, else DNS and plain HTTP from warthog.milenko.org); the
 list is the Multiplayer menu's ONLINE GAMES, which joins a game through
 internet play's tunnel, as on the original Xbox and the Xbox 360. The
 checklist: docs/hardware-test.md.

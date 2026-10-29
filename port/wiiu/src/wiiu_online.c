@@ -12,20 +12,28 @@ network self-test at start-up, both on a thread of the platform layer's
    port/linux/game/network_distributed.c).
 3. UDP: a datagram to this console's own address and port, read back (the
    loopback's if that does not come back).
-4. DNS: warthog.milenko.org looked up.
-5. HTTP: GET /v1/console/games from warthog.milenko.org, plain HTTP/1.0 as
-   the original Xbox and the Xbox 360 ask for it, parsed; the list is the
-   Multiplayer menu's ONLINE GAMES (game/wiiu_browser_screen.c).
+4. HTTPS: GET /v1/console/games from stats.chupathingy.org (wiiu_https.c,
+   the site's key pinned), parsed; the list is the Multiplayer menu's
+   ONLINE GAMES (game/wiiu_browser_screen.c). When that fails, DNS and HTTP:
+   warthog.milenko.org looked up, and the same GET over plain HTTP/1.0 as
+   the original Xbox and the Xbox 360 ask for it. A key or a name refused
+   is refused again: plain HTTP for the rest of the run.
 
-Each step is one line in port.txt ("net test: ..."). Never an address:
-only its kind. The sockets are wiiu_net.c's (posix.h), so the list and the
-self-test go through what the game's own networking uses.
+Each step is one line in port.txt ("net test: ..."), and each list says
+which way it came. Never an address: only its kind. The sockets are
+wiiu_net.c's (posix.h), so the list and the self-test go through what the
+game's own networking uses.
+
+After the list, the same thread fetches the signed legacy table when it
+is due (wiiu_https_table_refresh), so its stack has room for HTTPS and the
+table's document.
 
 The Xbox 360's (ChupathingyCE/warthog-360, port/xbox360/src/x360_online.c)
 on the Wii U's threads and clock.
 */
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -40,11 +48,18 @@ on the Wii U's threads and clock.
 #include "thread_stop.h"
 #include "wiiu_game_list.h"
 #include "wiiu_port.h"
+#include "port/console/https/console_https.h"
+#include "port/linux/include/delta.h"
 
 #define FETCH_TIMEOUT 15000
 #define ATTEMPTS 3
 #define RETRY_WAIT 10000
 #define ECHO_WAIT 2000
+/* the list's thread's stack: wut's own for a thread given none (128 KB,
+wut_thread.c), CONSOLE_HTTPS_STACK_SIZE more for the TLS session's arena
+and Mbed TLS's frames, and DELTA_REFRESH_STACK_SIZE for the signed table's
+document; from the system's heap, given back when the thread ends */
+#define ONLINE_THREAD_STACK (128 * 1024 + CONSOLE_HTTPS_STACK_SIZE + DELTA_REFRESH_STACK_SIZE)
 
 /* Winsock's codes, as posix_socket_last_error gives them (wiiu_net.c) */
 #define WSAEWOULDBLOCK 10035
@@ -77,6 +92,10 @@ static int shown_error;
 static int shown_state = WIIU_GAME_LIST_NONE;
 /* the self-test runs once, before the first fetch */
 static int self_tested;
+/* the list came over HTTPS (the fetch's thread's); HTTPS was refused for
+good (a key or a name) */
+static int list_secure;
+static int https_refused;
 
 static void set_state(int state)
 {
@@ -242,6 +261,16 @@ static int http_request(unsigned long address, unsigned short port, const char *
 	}
 	posix_socket_close(handle);
 	return result;
+}
+
+int wiiu_online_plain_get(const char *host, const char *path, char *response, unsigned long size,
+	unsigned long *received, unsigned long timeout_ms)
+{
+	unsigned long address = (unsigned long)posix_resolve_ipv4(host);
+
+	*received = 0;
+	return address && http_request(address, 80, host, path, NULL, response, size, received, timeout_ms) == GAME_LIST_OK &&
+		*received > 0;
 }
 
 /* ---------- the self-test's UDP step */
@@ -575,13 +604,74 @@ static const char *udp_echo(unsigned long *milliseconds, const char **failure)
 
 /* ---------- the list */
 
-static int fetch_once(char *buffer, int test)
+/* the list over HTTPS from the site (its key pinned: the game's
+docs/console-https.md): GAME_LIST_OK and the list, or another result and
+the plain HTTP list is asked instead */
+static int fetch_https(char *buffer, int test)
+{
+	struct game_list_response response;
+	unsigned long received = 0, start = now_ms();
+	int result;
+
+	result = console_https_request(CONSOLE_HTTPS_SITE, GAME_LIST_PATH, NULL, NULL, buffer, GAME_LIST_RESPONSE_SIZE,
+		&received, FETCH_TIMEOUT);
+	if (result != CONSOLE_HTTPS_OK)
+	{
+		if (test)
+			wiiu_log("net test: HTTPS GET %s from %s FAILED: %s (%lu ms)", GAME_LIST_PATH, CONSOLE_HTTPS_SITE,
+				console_https_error_string(result), now_ms() - start);
+		else
+			wiiu_log("game list: HTTPS: %s; asking over plain HTTP", console_https_error_string(result));
+		/* (a key or a name refused is refused again: plain HTTP for the rest
+		of this run) */
+		if (result == CONSOLE_HTTPS_ERROR_KEY || result == CONSOLE_HTTPS_ERROR_NAME)
+		{
+			https_refused = 1;
+			wiiu_log("game list: HTTPS refused (%s): plain HTTP for the rest of this run",
+				console_https_error_string(result));
+		}
+		return GAME_LIST_ERROR_CONNECT;
+	}
+	result = game_list_parse_response(buffer, received, &response);
+	if (result == GAME_LIST_OK && response.status != 200)
+		result = GAME_LIST_ERROR_HTTP;
+	if (result == GAME_LIST_OK)
+		result = game_list_parse(response.body, response.body_size, &fetched);
+	if (test)
+	{
+		if (result == GAME_LIST_OK)
+			wiiu_log("net test: HTTPS GET %s from %s: status 200, %lu bytes, %d games (%lu ms)", GAME_LIST_PATH,
+				CONSOLE_HTTPS_SITE, received, fetched.count, now_ms() - start);
+		else
+			wiiu_log("net test: HTTPS GET %s from %s FAILED: %s, %lu bytes received (%lu ms)", GAME_LIST_PATH,
+				CONSOLE_HTTPS_SITE, game_list_error_string(result), received, now_ms() - start);
+	}
+	else if (result != GAME_LIST_OK && result != GAME_LIST_ERROR_FORMAT)
+	{
+		wiiu_log("game list: HTTPS: %s; asking over plain HTTP", game_list_error_string(result));
+	}
+	if (result == GAME_LIST_OK)
+		list_secure = 1;
+	return result;
+}
+
+static int fetch_once(char *buffer, int test, int attempt)
 {
 	struct game_list_response response;
 	unsigned long address, received = 0;
-	unsigned long start = now_ms();
+	unsigned long start;
 	int result;
 
+	list_secure = 0;
+	/* (HTTPS first, on each fetch's first try; a list that came over it
+	ends the fetch, anything else falls back) */
+	if (attempt == 1 && !https_refused && console_https_available())
+	{
+		result = fetch_https(buffer, test);
+		if (result == GAME_LIST_OK || result == GAME_LIST_ERROR_FORMAT)
+			return result;
+	}
+	start = now_ms();
 	address = (unsigned long)posix_resolve_ipv4(GAME_LIST_HOST);
 	if (test)
 	{
@@ -650,11 +740,10 @@ static void self_test(void)
 	stun_tests();
 }
 
-static void *online_thread(void *parameter)
+static void online_main(void)
 {
 	int attempt, result = GAME_LIST_ERROR_CONNECT, test = !self_tested;
 
-	(void)parameter;
 	if (test)
 	{
 		self_tested = 1;
@@ -664,11 +753,12 @@ static void *online_thread(void *parameter)
 	{
 		list_error = GAME_LIST_ERROR_CONNECT;
 		set_state(_list_failed);
-		return NULL;
+		return;
 	}
+	wiiu_https_start();
 	for (attempt = 1; attempt <= ATTEMPTS && !thread_stop_requested(); attempt++)
 	{
-		result = fetch_once(response_buffer, test && attempt == 1);
+		result = fetch_once(response_buffer, test && attempt == 1, attempt);
 		if (result == GAME_LIST_OK || result == GAME_LIST_ERROR_FORMAT)
 			break;
 		wiiu_log("game list: try %d of %d: %s", attempt, ATTEMPTS, game_list_error_string(result));
@@ -677,12 +767,50 @@ static void *online_thread(void *parameter)
 	}
 	list_error = result;
 	if (result == GAME_LIST_OK)
-		wiiu_log("game list: %d games (format %d)%s", fetched.count, fetched.format,
+		wiiu_log("game list: %d games (format %d) from %s%s", fetched.count, fetched.format,
+			list_secure ? CONSOLE_HTTPS_SITE " over HTTPS" : GAME_LIST_HOST " over plain HTTP",
 			fetched.skipped ? ", some lines left out" : "");
 	if (test)
 		wiiu_log("net test: done");
 	set_state(result == GAME_LIST_OK ? _list_done : _list_failed);
+	/* (the signed legacy table, when it is due: after the list, so that the
+	list is never held up by it) */
+	wiiu_https_table_refresh();
+}
+
+static void *online_thread(void *parameter)
+{
+	online_main();
+	/* (counted for the game's end since it was made: online_thread_start) */
+	thread_stop_leave((int)(long)parameter);
 	return NULL;
+}
+
+/* the list's thread: as thread_stop_create makes one (counted, so the
+game's end waits for it), with a stack of ONLINE_THREAD_STACK; 0 when it
+started */
+static int online_thread_start(void)
+{
+	pthread_attr_t attributes;
+	pthread_t thread;
+	int slot = thread_stop_enter("game list", 1), result;
+
+	/* (a full table still starts the thread, uncounted; only the end stops
+	new ones) */
+	if (slot < 0 && thread_stop_requested())
+		return -1;
+	pthread_attr_init(&attributes);
+	pthread_attr_setstacksize(&attributes, ONLINE_THREAD_STACK);
+	result = pthread_create(&thread, &attributes, online_thread, (void *)(long)slot);
+	pthread_attr_destroy(&attributes);
+	if (result != 0)
+	{
+		wiiu_log("game list: no thread (%d KB of stack asked for)", ONLINE_THREAD_STACK / 1024);
+		thread_stop_leave(slot);
+		return -1;
+	}
+	pthread_detach(thread);
+	return 0;
 }
 
 /* one request to the list's host (Link Profile's: src/wiiu_console_link.c),
@@ -723,7 +851,7 @@ void wiiu_game_list_request(void)
 	list_taken = 0;
 	shown_state = WIIU_GAME_LIST_FETCHING;
 	set_state(_list_fetching);
-	if (thread_stop_create("game list", online_thread, NULL) != 0)
+	if (online_thread_start() != 0)
 	{
 		list_error = GAME_LIST_ERROR_CONNECT;
 		set_state(_list_failed);
@@ -742,7 +870,7 @@ static void take(void)
 	{
 		shown_error = list_error;
 		shown_state = WIIU_GAME_LIST_FAILED;
-		wiiu_log("game list: could not get the list from %s (%s)", GAME_LIST_HOST,
+		wiiu_log("game list: could not get the list from %s or %s (%s)", CONSOLE_HTTPS_SITE, GAME_LIST_HOST,
 			game_list_error_string(list_error));
 		return;
 	}
