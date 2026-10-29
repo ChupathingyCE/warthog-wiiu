@@ -39,6 +39,9 @@ LINUX_SRC = Path("port/linux/src")
 LINUX_GAME = Path("port/linux/game")
 CONSOLE_INCLUDE = Path("port/console/include")
 CONSOLE_GAME = Path("port/console/game")
+# Link Profile with the console's own key (console_link.c over
+# src/wiiu_console_link.c's hooks, and its panel over ONLINE GAMES)
+CONSOLE_LINK = Path("port/console/link")
 TOML_DIR = Path("port/third_party/tomlc17")
 EXPAT_DIR = Path("port/third_party/expat")
 EXPAT_SOURCES = ("xmlparse.c", "xmlrole.c", "xmltok.c")
@@ -65,6 +68,10 @@ TARGET_FLAGS = [
     "-DHALO_CONSOLE",
     "-DHALO_WIIU_CONSOLE",
     "-DHALO_BIG_ENDIAN",
+    # Delta Peer as a client, as the original Xbox and the Xbox 360 have it
+    # (the game's port/linux/src/delta_peer_game.c): the console joins a
+    # Delta host by its wire and range, whatever OpenCE number it announces
+    "-DHALO_CONSOLE_DELTA",
     # the menus' map list and the Xbox map packs (maps_<pack>: Halo CE+), as
     # the original Xbox, the Xbox 360 and the desktop builds have them (the
     # game's port/linux/game/ui_map_list.c, map_packs.c)
@@ -419,7 +426,9 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
     # the port's own game units: the Multiplayer menu's ONLINE GAMES
     # (HALO_CONSOLE_ONLINE_GAMES), in the game's terms
     for source in sorted((port_dir / "game").glob("*.c")):
-        add_object(source, game_cflags, [semantics_header])
+        add_object(source, f"{game_cflags} -I{_quote(game / CONSOLE_LINK)}", [semantics_header])
+    add_object(game / CONSOLE_LINK / "console_link_panel.c", f"{game_cflags} -I{_quote(game / CONSOLE_LINK)}",
+               [semantics_header])
 
     platform_cflags = " ".join([
         abi,
@@ -466,12 +475,15 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
     for source in sorted((game / LINUX_SRC).glob("*.c")):
         if source.name in REPLACED_PLATFORM_SOURCES:
             continue
+        # (Delta Peer's PROFILE carries console_profile_id: src/wiiu_console_link.c)
+        profile_id = " -DHALO_CONSOLE_PROFILE_ID" if source.name == "delta_peer_game.c" else ""
         if source.name.startswith("posix_"):
             add_object(source, posix_cflags)
         elif source.name in HTTPS_PLATFORM_SOURCES:
-            add_object(source, f"{platform_cflags} {https_defines}")
+            add_object(source, f"{platform_cflags} {https_defines}{profile_id}")
         else:
-            add_object(source, platform_cflags)
+            add_object(source, platform_cflags + profile_id)
+    add_object(game / CONSOLE_LINK / "console_link.c", f"{platform_cflags} -I{_quote(game / CONSOLE_LINK)}")
     add_object(hud_assets, platform_cflags)
     # the port's units in the platform layer's terms (the Xbox SDK's
     # declarations): its window, input and the rest of sdl_platform.h
@@ -492,6 +504,7 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
         f"-I{_quote(port_dir / 'include')}",
         f"-I{_quote(game / LINUX_SRC)}",
         f"-I{_quote(game / CONSOLE_INCLUDE)}",
+        f"-I{_quote(game / CONSOLE_LINK)}",
         f"-I{_quote(game / MONOCYPHER_DIR)}",
         f"-I{_quote(port_dir / 'include' / 'posix')}",
         f"-isystem {_quote(sdl_include)}",

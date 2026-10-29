@@ -30,4 +30,11 @@ list is the Multiplayer menu's ONLINE GAMES, which joins a game through
 internet play's tunnel, as on the original Xbox and the Xbox 360. The
 checklist: docs/hardware-test.md.
 
+The console is a Delta Peer client (`HALO_CONSOLE_DELTA`), as the original
+Xbox and the Xbox 360 are. It joins a Delta host by its wire and range,
+whatever OpenCE number the host announces, and reads the host's game
+settings in the layout of that number. It hears text chat and says the
+controller's quick lines (no keyboard), and never hosts on Delta.
+`sh port/wiiu/tests/run.sh` checks the join decision on the host.
+
 `--wuhb` bundles the game only, never the maps.

@@ -46,6 +46,10 @@ list itself is the fetch's one copy (wiiu_game_list_get).
 #include <string.h>
 
 #include "wiiu_game_list.h"
+#include "console_link_panel.h"
+
+/* (src/wiiu_console_link.c's: Link Profile set up, once) */
+void wiiu_console_link_start(void);
 
 /* (ui_widget.c's) */
 long ui_widget_online_games_font(boolean heading);
@@ -344,6 +348,7 @@ void browser_screen_open(
 {
 	browser_screen.active = TRUE;
 	browser_screen.opened_time = system_milliseconds();
+	wiiu_console_link_start();
 	browser_screen.status[0] = 0;
 	if (!browser_screen.rows)
 		browser_screen.rows = MAXIMUM_ROWS;
@@ -402,7 +407,7 @@ void browser_screen_process(
 	take_list();
 	while (browser_screen.active && get_next_event(&event, NONE))
 	{
-		if (event.type == _browser_event_left_stick)
+		if (event.type == _browser_event_left_stick && !console_link_panel_active())
 		{
 			if (event.data.stick.y == SHORT_MAX)
 				move = -1;
@@ -412,6 +417,13 @@ void browser_screen_process(
 				move = -browser_screen.rows;
 			else if (event.data.stick.x == SHORT_MAX)
 				move = browser_screen.rows;
+		}
+		else if (event.type == _browser_event_button && console_link_panel_active())
+		{
+			/* (the Delta profile panel over the list takes the buttons) */
+			console_link_panel_button(event.data.button.index);
+			move = 0;
+			continue;
 		}
 		else if (event.type == _browser_event_button)
 		{
@@ -441,6 +453,13 @@ void browser_screen_process(
 				browser_screen.selected = 0;
 				browser_screen.selected_invite[0] = 0;
 				take_list();
+				break;
+			case _gamepad_binary_button_start:
+				if (!browser_screen.connecting && system_milliseconds() - browser_screen.opened_time > OPEN_SETTLE)
+				{
+					ui_play_audio_feedback_sound(_browser_sound_forward);
+					console_link_panel_open();
+				}
 				break;
 			case _gamepad_analog_button_x:
 				ui_play_audio_feedback_sound(_browser_sound_forward);
@@ -694,7 +713,12 @@ void browser_screen_render(
 		SCREEN_RIGHT, RULE_Y - 2, "ONLINE GAMES");
 	for (index = 0; index < browser_screen.count && list; index++)
 		players += list->games[browser_screen.order[index]].players;
-	snprintf(line, sizeof(line), "%d GAMES   %ld PLAYERS", browser_screen.count, players);
+	{
+		char delta[48];
+
+		console_link_panel_summary(delta, sizeof(delta));
+		snprintf(line, sizeof(line), "%s   %d GAMES   %ld PLAYERS", delta, browser_screen.count, players);
+	}
 	text(font, _justify_right, &dim_color, SCREEN_LEFT, RULE_Y - 2 - line_height(font), SCREEN_RIGHT,
 		RULE_Y - 2, line);
 	quad(SCREEN_LEFT, RULE_Y, SCREEN_RIGHT, RULE_Y + 1, COLOR_RULE);
@@ -782,9 +806,9 @@ void browser_screen_render(
 		/* (Y names the filter it is on) */
 		static wchar_t const *const buttons[] =
 		{
-			L"%a-button Join     %x-button Refresh     %y-button Filter: All     %b-button Back",
-			L"%a-button Join     %x-button Refresh     %y-button Filter: Multiplayer     %b-button Back",
-			L"%a-button Join     %x-button Refresh     %y-button Filter: Co-op     %b-button Back",
+			L"%a-button Join   %x-button Refresh   %y-button Filter: All   %start-button Delta   %b-button Back",
+			L"%a-button Join   %x-button Refresh   %y-button Filter: Multiplayer   %start-button Delta   %b-button Back",
+			L"%a-button Join   %x-button Refresh   %y-button Filter: Co-op   %start-button Delta   %b-button Back",
 		};
 		rectangle2d bounds;
 
@@ -797,6 +821,7 @@ void browser_screen_render(
 			browser_screen.connecting ? L"%b-button Stop" :
 				buttons[browser_list_filter() == 2 ? 2 : browser_list_filter() == 1 ? 1 : 0], FALSE);
 	}
+	console_link_panel_render(font, heading_font);
 }
 
 /* ---------- what the menus ask of the desktop builds' other screens

@@ -15,8 +15,14 @@ void wiiu_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void wiiu_log_v(const char *format, va_list arguments);
 void wiiu_log_flush(void);
 /* the time spent writing the log's lines to the SD card since the start,
-in OSTime ticks (the renderer's frame lines) */
+in OSTime ticks (the renderer's frame lines), and the share of it the
+threads that logged waited for (none while the writer thread takes them) */
 long long wiiu_log_write_ticks(void);
+long long wiiu_log_wait_ticks(void);
+/* the writer thread: started once ProcUI is up, stopped at the end's start
+(wiiu_proc.c) */
+void wiiu_log_start_writer(void);
+void wiiu_log_stop_writer(void);
 
 /* the log on the TV and the GamePad until the renderer starts
 (wiiu_screen.c) */
