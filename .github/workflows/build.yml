@@ -97,8 +97,11 @@ jobs:
       - name: Host tests
         run: CC=gcc sh port/wiiu/tests/run.sh
 
+      # the build testers get, as the original Xbox's: the debug decomp's
+      # asserts compiled out as the retail game had them, but for the memory
+      # checks (the game's configure.py --console-no-debug-asserts)
       - name: Configure
-        run: python3 chupathingyce/configure.py --console-port port/wiiu --cafeglsl /opt/cafeglsl --compiler-launcher ccache
+        run: python3 chupathingyce/configure.py --console-port port/wiiu --cafeglsl /opt/cafeglsl --compiler-launcher ccache --console-no-debug-asserts
 
       - name: Build
         env:
