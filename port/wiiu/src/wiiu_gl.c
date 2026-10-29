@@ -584,10 +584,23 @@ GX2CopySurface notes that the real one sets up draw calls where Cemu's is a
 command of its own (GX2_Surface_Copy.cpp), which is why Cemu drew right
 while a copy in the middle of a frame left the console drawing the rest of
 that frame into the texture just copied. */
+/* The last draw, for console_gl_draw_again (the game's d3d8_gl.c draws
+the lens flares' visibility tests after the first with the first one's
+state): valid while GX2 has what that draw gave it, its shaders, state,
+targets, textures and attribute buffers, and those read the GL buffers where
+they are (no copy made for that draw's vertices alone). GX2's own work, a
+target bound, a uniform set, a blit or the frame's end ends it. */
+static struct
+{
+	int valid;
+	struct program *program;
+} again;
+
 static void gx2_own_work_done(void)
 {
 	GX2ContextState *context = wiiu_video_context_state();
 
+	again.valid = 0;
 	if (context)
 		GX2SetContextState(context);
 	gl.bound_color = NULL;
@@ -1759,11 +1772,13 @@ static void bind_targets(void)
 	channels masked: GX2 draws with one) */
 	if (color && color != gl.bound_color)
 	{
+		again.valid = 0;
 		GX2SetColorBuffer(color, GX2_RENDER_TARGET_0);
 		gl.bound_color = color;
 	}
 	if (depth && depth != gl.bound_depth)
 	{
+		again.valid = 0;
 		GX2SetDepthBuffer(depth);
 		gl.bound_depth = depth;
 	}
@@ -2409,6 +2424,8 @@ static void uniform_set(GLint location, const float *values, int vectors, int co
 	struct uniform *uniform;
 	int index, element;
 
+	/* (GX2's uniform registers are the last draw's no more) */
+	again.valid = 0;
 	if (!program || location < 0)
 		return;
 	index = LOCATION_UNIFORM(location);
@@ -3392,7 +3409,9 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 	GX2PrimitiveMode primitive;
 	const unsigned char *source = NULL;
 	unsigned long index_bytes = index_type == GL_UNSIGNED_INT ? 4 : 2;
+	int repeatable;
 
+	again.valid = 0;
 	debug_load();
 	if (debug.no_draws || !count || !prepare_draw())
 		return;
@@ -3429,6 +3448,8 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 	}
 	if (!setup_vertices(base_vertex))
 		return;
+	/* (its attribute buffers are the GL buffers themselves) */
+	repeatable = !index_type && !draw_copies_attributes() && !debug.log_draws && !debug.gpu_check;
 	if (primitive == GX2_PRIMITIVE_MODE_TRIANGLE_FAN ||
 		(!debug.native_strips && primitive == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP))
 	{
@@ -3479,6 +3500,8 @@ static void draw_steps(GLenum mode, unsigned long first, unsigned long count, GL
 	gl.draws++;
 	gl.frame_draws++;
 	targets_written();
+	again.valid = repeatable;
+	again.program = object_get(gl.program, _object_program);
 	{
 		struct program *program = object_get(gl.program, _object_program);
 		int first = program && !program->gpu_checked;
@@ -3495,6 +3518,44 @@ static void draw(GLenum mode, unsigned long first, unsigned long count, GLenum i
 {
 	watch_step("a draw");
 	draw_steps(mode, first, count, index_type, indices, base_vertex);
+	watch_step("the game's own work");
+}
+
+/* The last draw again, its vertices from `first` (d3d8_gl.c's visibility
+test runs, by name through SDL_GL_GetProcAddress): the caller has changed
+nothing since but the bound buffers' bytes and the queries, so GX2 already
+has the shaders, state and attribute buffers; only the draw is made (a fan's
+or a strip's triangles as a list, as draw_steps makes them). A draw that
+cannot be repeated so is made in full. */
+static void console_gl_draw_again(GLenum mode, GLint first, GLsizei count)
+{
+	GX2PrimitiveMode primitive;
+	unsigned long vertices = (unsigned long)count;
+
+	if (!again.valid || first < 0 || object_get(gl.program, _object_program) != again.program ||
+		!wiiu_video_drawing())
+	{
+		draw(mode, (unsigned long)first, (unsigned long)count, 0, NULL, 0);
+		return;
+	}
+	watch_step("a draw");
+	primitive = primitive_mode(mode, &vertices);
+	if (primitive == GX2_PRIMITIVE_MODE_TRIANGLE_FAN ||
+		(!debug.native_strips && primitive == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP))
+	{
+		unsigned long list_count, list_bytes;
+		const void *list = vertices >= 3 ? fan_as_list((unsigned long)first, vertices, NULL, 2, &list_count,
+			&list_bytes, primitive == GX2_PRIMITIVE_MODE_TRIANGLE_STRIP) : NULL;
+
+		if (list)
+			GX2DrawIndexedEx(GX2_PRIMITIVE_MODE_TRIANGLES, (uint32_t)list_count,
+				list_bytes == 4 ? GX2_INDEX_TYPE_U32 : GX2_INDEX_TYPE_U16, list, 0, 1);
+	}
+	else if (vertices)
+		GX2DrawEx(primitive, (uint32_t)vertices, (uint32_t)first, 1);
+	gl.draws++;
+	gl.frame_draws++;
+	targets_written();
 	watch_step("the game's own work");
 }
 
@@ -3556,6 +3617,7 @@ static void quad_draw(struct shader *pixel, float x0, float y0, float x1, float 
 	GX2FetchShader *fetch;
 	int corner;
 
+	again.valid = 0;
 	if (!corners || !gl.blit_vertex || !pixel)
 		return;
 	for (corner = 0; corner < 4; corner++)
@@ -5125,6 +5187,7 @@ static void APIENTRY wiiu_glGetQueryBufferObjectuiv(GLuint id, GLuint buffer, GL
 go, two frames on */
 void wiiu_gl_frame_end(void)
 {
+	again.valid = 0;
 	if (!gl.ready)
 		return;
 	if (debug.trace && gl.frame < 12)
@@ -5206,6 +5269,8 @@ static const struct
 	ENTRY(glVertexAttribIFormat) ENTRY(glVertexAttribIPointer) ENTRY(glVertexAttribPointer) ENTRY(glViewport)
 	/* (the optional ones the renderer manages without: glBufferStorage,
 	glCopyImageSubData, glDebugMessageCallback) */
+	/* (not GL's: the renderer's visibility test runs, d3d8_gl.c) */
+	{ "console_gl_draw_again", (void *)console_gl_draw_again },
 };
 
 void *wiiu_gl_proc_address(const char *name)
