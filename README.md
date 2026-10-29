@@ -1,24 +1,35 @@
+<p align="center"><img src="docs/icon-160.png" width="120" alt=""></p>
+
 <h1 align="center">Warthog for Wii U</h1>
 
-<p align="center"><b>Chupathingy on the Wii U (homebrew, Aroma).</b></p>
+<p align="center"><b>Chupathingy on the Wii U.</b></p>
 
 <p align="center">
-<a href="https://github.com/ChupathingyCE/chupathingyce">The game (Chupathingy)</a> ·
+<a href="https://github.com/ChupathingyCE/warthog-wiiu/releases">Download the test build</a> ·
+<a href="https://stats.chupathingy.org">Games online now</a> ·
+<a href="https://github.com/ChupathingyCE/chupathingyce">The game</a> ·
 <a href="https://discord.gg/chupathingy">Discord</a>
 </p>
 
-## Status
+<p align="center"><img src="docs/screenshots/wii-u.jpg" width="640" alt="Blood Gulch on a Wii U"></p>
 
-**Public test build.** Chupathingy plays on a Wii U: the menus, offline
-multiplayer maps, and online games through Online Games, with the [C] Warthog
-servers and community servers. It is early and has had little time on real
-consoles. Get it from the
-[test-20261022 release](https://github.com/ChupathingyCE/warthog-wiiu/releases/tag/test-20261022).
+Play Chupathingy as homebrew on a Wii U with Aroma. Play on the TV with the
+GamePad or a Pro Controller, and join the same online games as PCs and other
+consoles.
+
+**Status: public test build.** The menus, multiplayer maps and online games
+work. Online games run slower than we'd like, and we're working on it. The
+campaign hasn't been tested yet.
+
+Get the newest test build from [Releases](https://github.com/ChupathingyCE/warthog-wiiu/releases).
+
+You need your own copy of Halo. No game files are included.
 
 ## Install
 
 1. You need a Wii U running [Aroma](https://aroma.foryour.cafe/).
-2. Download `chupathingy-wiiu-test-20261022.zip` from the release, unpack it,
+2. Download the newest `chupathingy-wiiu-test-<date>.zip` from
+   [Releases](https://github.com/ChupathingyCE/warthog-wiiu/releases), unpack it,
    and copy its `wiiu` folder to the root of your SD card, so you end up with
    `wiiu/apps/halo.wuhb` and `wiiu/apps/halo/halo.rpx`.
 3. Copy the maps from your own copy of Halo (the NTSC maps, 01.10.12.2276)
@@ -106,6 +117,11 @@ folder you point it at, onto your own SD card.
 ## Links
 
 - The game: https://github.com/ChupathingyCE/chupathingyce
+- Games online now: https://stats.chupathingy.org
 - Discord: https://discord.gg/chupathingy
 
 Licensed GPL-3.0; see `LICENSE`.
+
+Warthog is an unofficial fan project. It isn't affiliated with or endorsed by
+Nintendo, Microsoft, Xbox Game Studios, Bungie or Halo Studios. Halo is a
+trademark of Microsoft. No game files are included: you bring your own copy.
