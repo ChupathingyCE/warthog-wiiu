@@ -490,3 +490,51 @@ Underground (ratrace@cex) at about 15 fps.
   (power off fully to recover). The end now stops the sound's thread and
   the exit trace's before the system's exit, as SDL's Wii U port does
   (docs/exit.md); not yet tested on the console.
+
+## Halo CE+ at 15 fps: what the logs show (2026-10-28)
+
+The 10-27 hardware logs (Underground, ratrace@cex, about 15 fps) have three
+things in them, none of them the map itself:
+
+- **The log.** "settings: no such setting display.particle_limit" (and the
+  light limits) was written about three times a frame: that build's
+  settings had no such rows on the Wii U. Each line opens, appends and
+  closes port.txt on the SD card, so 500 to 1500 ms of every 2 s went to
+  the log. The game's main has had the rows on every build and logs an
+  unknown name once since game 9f8ed7d1, which this repo's submodule has.
+- **The limits.** With no rows, the Wii U ran with no dynamic light limit,
+  the particles moved every frame and the 8192-particle cap. Fixed by the
+  same commit.
+- **The flip.** The rest of the frame was mostly the wait for the flip
+  (about 30 ms a frame), which is the GPU's work plus the vsync. The logs
+  cannot tell the GPU's share from the vsync's.
+
+This build:
+
+- port.txt is written by a thread of the log's own once ProcUI is up: the
+  thread that logs queues the line and goes on. `wiiu_log_flush` still
+  writes everything before it returns, and the end stops the thread first
+  (proc_end). The frame line's "waiting for the log" is now the game's
+  thread's wait only.
+- Render targets (textures made empty with one level, the renderer's,
+  d3d8_gl.c) are made again in GX2's tiling when first drawn into, as the
+  screen's color buffer is; before, the whole scene was drawn into a linear
+  1280x720 surface in MEM2. `linear_targets` in gl.txt keeps them linear.
+  Cemu (interpreter) draws the main menu and Blood Gulch as before.
+- `debug.gpu_stats = true` (the game's setting, off by default) adds two
+  lines to each frame line: the game's thread's working time against its
+  waits, this layer's share by part (state, vertices copied, strips made
+  lists, index reads), the GPU's time from a frame's first command to its
+  last (GX2SampleTopGPUCycle and GX2SampleBottomGPUCycle; Cemu gives 0),
+  draws, draws into linear targets, uniforms and ring bytes.
+
+In Cemu, Blood Gulch: 123 draws, this layer 13 to 15 ms of a 75 ms frame
+(interpreter), 36,000 indices a frame made lists from strips.
+
+**Next, on the console:** a CE+ map with `debug.gpu_stats = true`. If the
+GPU's time is most of the frame: the main render target and its depth in
+MEM1 (they are in MEM2; MEM1 is given back at each HOME button menu, so
+they need making again there), HiZ on the depth buffers, and the cube maps'
+lookup in the shader (`native_cubes`). If the game's thread is: the strips
+drawn natively (`native_strips`, a Cemu workaround that may not be needed
+on hardware), and a frame in flight while the next is made.
