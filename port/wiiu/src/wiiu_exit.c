@@ -290,7 +290,7 @@ void wiiu_exit_begin(void)
 		coreinit_exit = __wut_exit;
 		__wut_exit = coreinit_exit_traced;
 	}
-	if (OSCreateThread(&beat_thread, beat_main, 0, NULL, beat_stack + BEAT_STACK, BEAT_STACK, 17,
+	if (OSCreateThread(&beat_thread, WIIU_THREAD_ENTRY(beat_main), 0, NULL, beat_stack + BEAT_STACK, BEAT_STACK, 17,
 		OS_THREAD_ATTRIB_AFFINITY_ANY))
 	{
 		OSSetThreadName(&beat_thread, "exit beat");

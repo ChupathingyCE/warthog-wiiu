@@ -35,9 +35,10 @@ BOOL platform_sdl_initialize(void)
 }
 
 /* (no disc image to offer: the player's maps are on the SD card) */
-BOOL platform_offer_game_data(const char *destination)
+BOOL platform_offer_game_data(char *destination, unsigned long size)
 {
 	(void)destination;
+	(void)size;
 	return FALSE;
 }
 
