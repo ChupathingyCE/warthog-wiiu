@@ -118,4 +118,12 @@ void wiiu_pad_update(void);
 int wiiu_pad_read(int port, struct wiiu_pad_state *state);
 void wiiu_pad_rumble(int port, int on);
 
+/* A thread's entry for OSCreateThread, cast to wut's OSThreadEntryPointFn as
+SDL2's Wii U port does (devkitPro/SDL wiiu-sdl2-2.28,
+src/thread/wiiu/SDL_systhread.c and src/audio/wiiu/SDL_wiiuaudio.c). wut
+1.9.2 (devkitPro/wut #421) changed the entry's second argument from
+const char ** to void *; the threads here never read it, and with the cast
+the port builds against both. (Needs <coreinit/thread.h>.) */
+#define WIIU_THREAD_ENTRY(entry) ((OSThreadEntryPointFn)(entry))
+
 #endif

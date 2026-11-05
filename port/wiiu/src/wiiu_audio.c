@@ -218,7 +218,7 @@ static int audio_voices_start(void)
 		free(stack);
 		return 0;
 	}
-	if (!OSCreateThread(thread, audio_voices_make, 0, NULL, stack + stack_size, stack_size,
+	if (!OSCreateThread(thread, WIIU_THREAD_ENTRY(audio_voices_make), 0, NULL, stack + stack_size, stack_size,
 		OSGetThreadPriority(OSGetCurrentThread()), AUDIO_AX_AFFINITY))
 	{
 		free(thread);
@@ -375,7 +375,7 @@ static void audio_ax_quit_on_core(void)
 	thread = memalign(16, sizeof(*thread));
 	stack = memalign(16, stack_size);
 	if (!thread || !stack ||
-		!OSCreateThread(thread, audio_ax_quit, 0, NULL, stack + stack_size, stack_size,
+		!OSCreateThread(thread, WIIU_THREAD_ENTRY(audio_ax_quit), 0, NULL, stack + stack_size, stack_size,
 		OSGetThreadPriority(OSGetCurrentThread()), AUDIO_AX_AFFINITY))
 	{
 		free(thread);
@@ -489,7 +489,7 @@ int wiiu_audio_open(int rate, wiiu_audio_fill fill, void *context)
 	audio.thread_stack = memalign(16, stack_size);
 	audio.thread_running = 1;
 	if (!audio.thread || !audio.thread_stack ||
-		!OSCreateThread(audio.thread, audio_thread, 0, NULL, (unsigned char *)audio.thread_stack + stack_size, stack_size,
+		!OSCreateThread(audio.thread, WIIU_THREAD_ENTRY(audio_thread), 0, NULL, (unsigned char *)audio.thread_stack + stack_size, stack_size,
 		OSGetThreadPriority(OSGetCurrentThread()) - 1, OS_THREAD_ATTRIB_AFFINITY_ANY))
 	{
 		wiiu_log("audio: the filling thread could not be made");

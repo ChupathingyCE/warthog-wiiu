@@ -254,7 +254,7 @@ void wiiu_log_start_writer(void)
 	it sleeps until there are lines, and a thread below the game's, which
 	never sleeps, is never run in Cemu) */
 	if (!writer_thread || !writer_stack ||
-		!OSCreateThread(writer_thread, writer_main, 0, NULL, (unsigned char *)writer_stack + stack_size, stack_size,
+		!OSCreateThread(writer_thread, WIIU_THREAD_ENTRY(writer_main), 0, NULL, (unsigned char *)writer_stack + stack_size, stack_size,
 		OSGetThreadPriority(OSGetCurrentThread()) - 1, OS_THREAD_ATTRIB_AFFINITY_ANY))
 	{
 		free(writer_thread);
