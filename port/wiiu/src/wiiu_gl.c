@@ -997,7 +997,7 @@ static void watch_start(void)
 	watch.thread = memalign(16, sizeof(OSThread));
 	watch.stack = memalign(16, stack_size);
 	if (!watch.thread || !watch.stack ||
-		!OSCreateThread(watch.thread, watch_main, 0, NULL, (unsigned char *)watch.stack + stack_size, stack_size, 17,
+		!OSCreateThread(watch.thread, WIIU_THREAD_ENTRY(watch_main), 0, NULL, (unsigned char *)watch.stack + stack_size, stack_size, 17,
 		OS_THREAD_ATTRIB_AFFINITY_ANY))
 	{
 		free(watch.thread);
