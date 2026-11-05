@@ -7,7 +7,7 @@ STATUS.md the bring-up log.
 
 ## Requirements
 
-devkitPro's devkitPPC and wut (`/opt/devkitpro`, or `--devkitppc DIR` and `--wut DIR`), with `elf2rpl`; `wuhbtool` for `--wuhb`. For shaders, CafeGLSL's Wii U library (v1.0.0-rc1 or later: its portlib in `/opt/devkitpro/portlibs/wiiu`, or `--cafeglsl DIR`); docs/renderer.md.
+devkitPro's devkitPPC and wut (`/opt/devkitpro`, or `--devkitppc DIR` and `--wut DIR`; CI has wut 1.9.2, and 1.9.1 works too), with `elf2rpl`; `wuhbtool` for `--wuhb`. For shaders, CafeGLSL's Wii U library (v1.0.0-rc1 or later: its portlib in `/opt/devkitpro/portlibs/wiiu`, or `--cafeglsl DIR`); docs/renderer.md.
 
 ## Build
 
@@ -19,7 +19,7 @@ python3 tools/wiiu_package.py --maps /path/to/maps --out ~/Downloads/Warthog-wii
 
 ## Testing
 
-Cemu, then Aroma on a console (`sd:/wiiu/apps/halo/`).
+Cemu, then Aroma on a console (`sd:/wiiu/apps/halo/`). `tools/cemu_smoke.sh` runs a package in Cemu (interpreter mode): the main menu, then Blood Gulch for 60 seconds. Its header has the options.
 
 ## Online
 

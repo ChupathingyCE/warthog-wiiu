@@ -19,11 +19,11 @@ your own copy of Halo (the NTSC maps, 01.10.12.2276) into
 - Boot and the menus, at 60 fps
 - Blood Gulch and the multiplayer maps offline, at 30 fps
 - Online play through Online Games: the [C] Warthog servers and community
-  servers
+  servers, OpenCE's newest (network version 41) and older ones
 - HOME and Close from the HOME Menu
 - Sound
 - The GamePad and the Pro Controller: A to accept, B to go back
-- Servers of up to 32 players in Online Games
+- Up to 16 players: Online Games lists only the servers that fit
 - The Halo CE+ map pack: copy its maps to `wiiu/apps/halo/maps_cex` to join
   CE+ games
 - Linking your Delta profile: on Online Games, press + (Start), then A for a
@@ -33,7 +33,7 @@ your own copy of Halo (the NTSC maps, 01.10.12.2276) into
 
 - Online matches run at about 15 fps (frame pacing); this is being worked on.
 - The campaign has not been tested yet.
-- Games on older OpenCE versions show "not accepting players".
+- Players past 16 in a PC host's game are not seen.
 - No movies: they are skipped.
 - The picture is slightly inset from the edges of the TV.
 - On some capture cards the TV picture may not fit until you press HOME once;
@@ -41,8 +41,10 @@ your own copy of Halo (the NTSC maps, 01.10.12.2276) into
 
 ## Report problems
 
-Tell us in #wii-u on the Discord (https://discord.gg/chupathingy). Say what you
-were doing, and attach `wiiu/apps/halo/logs/debug.txt` and `port.txt`.
+Send `wiiu/apps/halo/logs/debug.txt` and `wiiu/apps/halo/port.txt` at
+https://dump.chupathingy.org (platform: Wii U). Then tell us in #wii-u on the
+Discord (https://discord.gg/chupathingy) what you were doing, and give the
+reference code.
 
 ## Checking the download
 
