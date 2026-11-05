@@ -160,6 +160,13 @@ frame_now() {
 	grep -h -o "gl: frame [0-9]*" "$portable/log.txt" 2> /dev/null | tail -1 | sed 's/[^0-9]//g' | grep . || echo 0
 }
 
+# the draws in the frame of that newest report (a loading screen has a few,
+# a map's view a hundred or more)
+draws_now() {
+	grep -h "gl: frame [0-9]*" "$portable/log.txt" 2> /dev/null | tail -1 | grep -o "[0-9]* draws in the last" |
+		sed 's/[^0-9]//g' | grep . || echo 0
+}
+
 # the mark in the logs, after the line that must come first when there is one
 marked_in() {
 	local after=$1 mark=$2
@@ -213,11 +220,12 @@ phase() {
 			fi
 		elif [ "$drawing" = 0 ]; then
 			# (the first frames of a map wait for its shaders, compiled once
-			# and kept on the card: the time held starts when frames come)
-			if [ "$(frame_now)" -gt "$mark_frame" ]; then
+			# and kept on the card: the time held starts with the first frame
+			# of the view itself, past the loading screen's few draws)
+			if [ "$(frame_now)" -gt "$mark_frame" ] && [ "$(draws_now)" -ge 20 ]; then
 				drawing=$now
 				first_frame=$(frame_now)
-				echo "$name: drawing (frame $first_frame) after $((now - started)) s; running $hold s more"
+				echo "$name: drawing (frame $first_frame, $(draws_now) draws) after $((now - started)) s; running $hold s more"
 			elif [ $((now - started)) -ge "$timeout" ]; then
 				reason="no frame drawn after \"$mark\" in $timeout s (frame $mark_frame)"
 				break
