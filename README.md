@@ -17,26 +17,50 @@ Play Chupathingy as homebrew on a Wii U with Aroma. Play on the TV with the
 GamePad or a Pro Controller, and join the same online games as PCs and other
 consoles.
 
-**Status: public test build.** The menus, multiplayer maps and online games
-work. Online games run slower than we'd like, and we're working on it. The
-campaign hasn't been tested yet.
+**Status: public test builds.** Earlier test builds play the menus,
+multiplayer maps and online games on real consoles. The newest one, on the
+0.9.0 game, has so far run in the Cemu emulator only. The campaign hasn't
+been tested yet.
 
 Get the newest test build from [Releases](https://github.com/ChupathingyCE/warthog-wiiu/releases).
 
 You need your own copy of Halo. No game files are included.
 
+## What you need
+
+- **A Wii U running [Aroma](https://aroma.foryour.cafe/)**, and its SD
+  card.
+- **Your own Halo maps:** the North American (NTSC) maps, 01.10.12.2276,
+  from your own copy of Halo. The build has no game files, and we never
+  share them.
+
 ## Install
 
-1. You need a Wii U running [Aroma](https://aroma.foryour.cafe/).
-2. Download the newest `chupathingy-wiiu-test-<date>.zip` from
+1. Download the newest `chupathingy-wiiu-test-<date>.zip` from
    [Releases](https://github.com/ChupathingyCE/warthog-wiiu/releases), unpack it,
    and copy its `wiiu` folder to the root of your SD card, so you end up with
    `wiiu/apps/halo.wuhb` and `wiiu/apps/halo/halo.rpx`.
-3. Copy the maps from your own copy of Halo (the NTSC maps, 01.10.12.2276)
-   into `wiiu/apps/halo/maps` on the SD card. The build has no game files, and
-   we never share them.
-4. Start Chupathingy from the Wii U Menu. The GamePad and the Pro Controller
-   work: A accepts, B goes back.
+2. Copy your maps into `wiiu/apps/halo/maps` on the SD card.
+3. Start Chupathingy from the Wii U Menu.
+
+To update, copy the new `wiiu` folder over the old one. Your maps and
+settings stay.
+
+## What works
+
+- The menus, and the multiplayer maps offline.
+- **Online Games:** the [C] Warthog servers and community servers. It joins
+  OpenCE's newest servers (network version 41) and older ones.
+- **Up to 16 players.** Online Games lists only the servers that fit.
+- **Controllers:** the GamePad and the Pro Controller. A accepts, B goes
+  back.
+- **Split screen:** when you join a game in progress, the host waits a few
+  seconds for the other players on your Wii U. Press A on their
+  controllers right away.
+- **Sound**, and HOME and Close from the HOME Menu.
+- **The Halo CE+ map pack:** copy its maps to `wiiu/apps/halo/maps_cex` to
+  join CE+ games.
+- **Link your Delta profile** (below).
 
 ## Link your Delta profile
 
@@ -49,18 +73,23 @@ Keep that file to yourself. Unlink on the site's profile page.
 
 ## Known issues
 
-- Online matches run at about 15 fps (frame pacing); this is being worked on.
+- Online matches ran at about 15 fps (frame pacing) in earlier builds;
+  this is being worked on.
 - The campaign has not been tested yet.
 - No movies: they are skipped.
-- Games on older OpenCE versions show "not accepting players".
+- Players past 16 in a PC host's game are not seen.
 - The picture is slightly inset from the edges of the TV.
 - On some capture cards the TV picture may not fit until you press HOME once;
   regular TVs are fine.
 
 ## Reporting problems
 
-Tell us in #wii-u on the [Discord](https://discord.gg/chupathingy). Say what
-you were doing, and attach `wiiu/apps/halo/logs/debug.txt` and `port.txt`.
+1. Copy `wiiu/apps/halo/logs/debug.txt` and `wiiu/apps/halo/port.txt` from
+   the SD card to your computer.
+2. Send them at [dump.chupathingy.org](https://dump.chupathingy.org), with
+   "Wii U" as the platform. You get a reference code.
+3. Tell us in #wii-u on the [Discord](https://discord.gg/chupathingy) what
+   you were doing, and give the code.
 
 ## What is here
 
@@ -70,6 +99,9 @@ you were doing, and attach `wiiu/apps/halo/logs/debug.txt` and `port.txt`.
   prefix header), `src/` (the console layer), and a README with its requirements.
 - `tools/wiiu_package.py`: lays out the build for an SD card (Aroma, at
   `sd:/wiiu/apps/halo/`) or for Cemu.
+- `tools/cemu_smoke.sh`: a smoke test in Cemu 2.6 or later. It boots the
+  package to the main menu, then into Blood Gulch for 60 seconds, with your
+  own maps linked, never copied. A pass in Cemu is not a pass on a Wii U.
 
 The Wii U is big-endian, like the Xbox 360.
 
@@ -83,7 +115,8 @@ cd warthog-wiiu
 ```
 
 You need devkitPro's devkitPPC and wut (`/opt/devkitpro`, or pass
-`--devkitppc DIR` and `--wut DIR`). Then:
+`--devkitppc DIR` and `--wut DIR`). CI builds with wut 1.9.2; 1.9.1 works
+too. Then:
 
 ```sh
 python3 chupathingyce/configure.py --console-port port/wiiu --console-no-debug-asserts
