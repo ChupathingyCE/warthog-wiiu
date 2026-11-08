@@ -1340,6 +1340,14 @@ int posix_register_url_scheme(const char *scheme, const char *description)
 	return 0;
 }
 
+/* (nor a Discord to start the game for a friend's Join: game 0.9.0's
+p2p_discord.c asks; DISCORD_REGISTER_NONE, port/linux/src/discord_register.h) */
+int posix_register_discord_launch(const char *application)
+{
+	(void)application;
+	return 3;
+}
+
 int posix_discord_connect(void)
 {
 	return -1;
