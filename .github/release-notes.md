@@ -23,7 +23,7 @@ your own copy of Halo (the NTSC maps, 01.10.12.2276) into
 - HOME and Close from the HOME Menu
 - Sound
 - The GamePad and the Pro Controller: A to accept, B to go back
-- Up to 16 players: Online Games lists only the servers that fit
+- Up to 32 players: Online Games lists only the servers that fit
 - The Halo CE+ map pack: copy its maps to `wiiu/apps/halo/maps_cex` to join
   CE+ games
 - Linking your Delta profile: on Online Games, press + (Start), then A for a
@@ -33,7 +33,7 @@ your own copy of Halo (the NTSC maps, 01.10.12.2276) into
 
 - Online matches run at about 15 fps (frame pacing); this is being worked on.
 - The campaign has not been tested yet.
-- Players past 16 in a PC host's game are not seen.
+- A game that grows past 32 players is left, as a full one is.
 - No movies: they are skipped.
 - The picture is slightly inset from the edges of the TV.
 - On some capture cards the TV picture may not fit until you press HOME once;

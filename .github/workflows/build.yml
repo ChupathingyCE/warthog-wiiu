@@ -99,9 +99,10 @@ jobs:
 
       # the build testers get, as the original Xbox's: the debug decomp's
       # asserts compiled out as the retail game had them, but for the memory
-      # checks (the game's configure.py --console-no-debug-asserts)
+      # checks (the game's configure.py --console-no-debug-asserts), and 32
+      # players (--console-players 32), as the original Xbox's
       - name: Configure
-        run: python3 chupathingyce/configure.py --console-port port/wiiu --cafeglsl /opt/cafeglsl --compiler-launcher ccache --console-no-debug-asserts
+        run: python3 chupathingyce/configure.py --console-port port/wiiu --cafeglsl /opt/cafeglsl --compiler-launcher ccache --console-no-debug-asserts --console-players 32
 
       - name: Build
         env:
