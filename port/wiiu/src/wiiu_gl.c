@@ -4323,6 +4323,22 @@ static void APIENTRY wiiu_glGenRenderbuffers(GLsizei n, GLuint *names)
 {
 	generate(n, names, _object_renderbuffer, sizeof(struct renderbuffer));
 }
+static void APIENTRY wiiu_glDeleteRenderbuffers(GLsizei n, const GLuint *names)
+{
+	GLsizei index;
+
+	for (index = 0; index < n; index++)
+	{
+		void *renderbuffer = object_get(names[index], _object_renderbuffer);
+
+		if (!renderbuffer)
+			continue;
+		free(renderbuffer);
+		objects[names[index]].type = _object_none;
+		if (gl.renderbuffer == names[index])
+			gl.renderbuffer = 0;
+	}
+}
 static void APIENTRY wiiu_glBindRenderbuffer(GLenum target, GLuint renderbuffer)
 {
 	(void)target;
@@ -5436,7 +5452,7 @@ static const struct
 	ENTRY(glClearDepth) ENTRY(glClearStencil) ENTRY(glClipControl) ENTRY(glColorMask) ENTRY(glCompileShader)
 	ENTRY(glCompressedTexImage2D) ENTRY(glCompressedTexImage3D) ENTRY(glCopyBufferSubData) ENTRY(glCreateProgram)
 	ENTRY(glCreateShader) ENTRY(glCullFace) ENTRY(glDeleteBuffers) ENTRY(glDeleteProgram)
-	ENTRY(glDeleteFramebuffers) ENTRY(glDeleteShader) ENTRY(glDeleteTextures) ENTRY(glDepthFunc) ENTRY(glDepthMask)
+	ENTRY(glDeleteFramebuffers) ENTRY(glDeleteRenderbuffers) ENTRY(glDeleteShader) ENTRY(glDeleteTextures) ENTRY(glDepthFunc) ENTRY(glDepthMask)
 	ENTRY(glDepthRange) ENTRY(glDisable) ENTRY(glDisableVertexAttribArray) ENTRY(glDrawArrays) ENTRY(glDrawBuffers)
 	ENTRY(glDrawElements) ENTRY(glDrawElementsBaseVertex) ENTRY(glEnable) ENTRY(glEnableVertexAttribArray)
 	ENTRY(glEndQuery) ENTRY(glFinish) ENTRY(glFlush) ENTRY(glFramebufferRenderbuffer) ENTRY(glFramebufferTexture2D)
