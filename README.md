@@ -51,7 +51,7 @@ settings stay.
 - The menus, and the multiplayer maps offline.
 - **Online Games:** the [C] Warthog servers and community servers. It joins
   OpenCE's newest servers (network version 41) and older ones.
-- **Up to 16 players.** Online Games lists only the servers that fit.
+- **Up to 32 players.** Online Games lists only the servers that fit.
 - **Controllers:** the GamePad and the Pro Controller. A accepts, B goes
   back.
 - **Split screen:** when you join a game in progress, the host waits a few
@@ -77,7 +77,7 @@ Keep that file to yourself. Unlink on the site's profile page.
   this is being worked on.
 - The campaign has not been tested yet.
 - No movies: they are skipped.
-- Players past 16 in a PC host's game are not seen.
+- A game that grows past 32 players is left, as a full one is.
 - The picture is slightly inset from the edges of the TV.
 - On some capture cards the TV picture may not fit until you press HOME once;
   regular TVs are fine.
@@ -119,14 +119,15 @@ You need devkitPro's devkitPPC and wut (`/opt/devkitpro`, or pass
 too. Then:
 
 ```sh
-python3 chupathingyce/configure.py --console-port port/wiiu --console-no-debug-asserts
+python3 chupathingyce/configure.py --console-port port/wiiu --console-no-debug-asserts --console-players 32
 ninja wiiu
 ```
 
 `--console-no-debug-asserts` is the build testers get, faster on the
 console: the debug decomp's asserts are compiled out, as the retail game had
 them, except the memory checks. Leave it out for a build that stops at the
-first failed assert.
+first failed assert. `--console-players 32` is the 32-player build testers
+get, as on the original Xbox; without it the game's configure builds 16.
 
 This is the game's console-port build; see "Console ports" in the game's
 [docs/building.md](https://github.com/ChupathingyCE/chupathingyce/blob/main/docs/building.md).

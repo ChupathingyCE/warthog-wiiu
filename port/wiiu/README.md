@@ -12,10 +12,16 @@ devkitPro's devkitPPC and wut (`/opt/devkitpro`, or `--devkitppc DIR` and `--wut
 ## Build
 
 ```sh
-python3 chupathingyce/configure.py --console-port port/wiiu --devkitppc /opt/devkitpro/devkitPPC --wut /opt/devkitpro/wut
+python3 chupathingyce/configure.py --console-port port/wiiu --devkitppc /opt/devkitpro/devkitPPC --wut /opt/devkitpro/wut \
+    --console-no-debug-asserts --console-players 32
 ninja wiiu
 python3 tools/wiiu_package.py --maps /path/to/maps --out ~/Downloads/Warthog-wiiu
 ```
+
+`--console-players 32` is the test builds' 32 players (the game's default is
+16, the original Xbox's). The network tables hold that many, the console
+list asks for games of up to that many (`players=N`), and Delta hears the
+same count.
 
 ## Testing
 
