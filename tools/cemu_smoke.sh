@@ -10,7 +10,8 @@
 #             "portable" folder next to it, made and emptied by this script
 #             (and only one this script made), never the Cemu you play with.
 # --package   the card's folder (tools/wiiu_package.py --out DIR), holding
-#             wiiu/apps/halo.wuhb and wiiu/apps/halo/halo.rpx
+#             wiiu/apps/halo.wuhb (and wiiu/apps/halo/halo.rpx, copied
+#             too when it is there; Cemu starts the .wuhb)
 # --out       where the logs go (one folder a phase), and the scratch data
 # --maps-root the script that makes a data root of links to your own maps
 #             (default ~/halo-maps/new-data-root.sh); the maps are linked,
@@ -19,12 +20,23 @@
 #             levels\test\bloodgulch\bloodgulch)
 # --seconds   how long the map runs once it is loaded (default 60)
 # --timeout   the longest a phase may take to reach its mark (default 900)
+# --renderer  Cemu's graphics API: vulkan (the default) or opengl
+# --display   an X display to run on (Linux); without DISPLAY, the test
+#             starts its own Xvfb
+# --shots-every a screenshot of the display every N seconds while a phase
+#             runs, and one more at its end, in the phase's shots folder
+#             (default 15; 0 for none). Needs an X display and ImageMagick's
+#             import, so none on macOS
 #
 # The first boot passes when the game starts the main menu's music and draws
 # on for 10 s; the second when the map has loaded (its scripts read) and the
 # game has drawn it for --seconds, from its first frame after its shaders,
 # without a halt. Either fails on the game's EXCEPTION halt, on Cemu
-# leaving, or on the time running out. Cemu runs with its interpreter
+# leaving, on the time running out, on no frames drawn, or on a shader that
+# did not compile ("gl: a ... shader did not compile"; the game keeps its
+# source as failedNN.vert or .frag, kept with the phase's logs). Each
+# phase's result.txt has the reasons, and summary.txt in --out has both
+# phases on a line each. Cemu runs with its interpreter
 # (--force-interpreter): its recompiler misreads a compare across a call
 # in the menus' tags (port/wiiu/STATUS.md, milestone 2).
 #
@@ -42,6 +54,9 @@ maps_root="$HOME/halo-maps/new-data-root.sh"
 map='levels\test\bloodgulch\bloodgulch'
 seconds=60
 timeout=900
+renderer=vulkan
+display=${DISPLAY:-}
+shots_every=15
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -52,6 +67,9 @@ while [ $# -gt 0 ]; do
 		--map) map=$2; shift 2 ;;
 		--seconds) seconds=$2; shift 2 ;;
 		--timeout) timeout=$2; shift 2 ;;
+		--renderer) renderer=$2; shift 2 ;;
+		--display) display=$2; shift 2 ;;
+		--shots-every) shots_every=$2; shift 2 ;;
 		*) echo "$0: unknown argument $1" >&2; exit 2 ;;
 	esac
 done
@@ -59,6 +77,12 @@ if [ -z "$cemu" ] || [ -z "$package" ] || [ -z "$out" ]; then
 	echo "usage: $0 --cemu PATH --package DIR --out DIR [--maps-root SCRIPT] [--map NAME] [--seconds N] [--timeout N]" >&2
 	exit 2
 fi
+
+case "$renderer" in
+	vulkan) api=1 ;;
+	opengl) api=0 ;;
+	*) echo "$0: --renderer is vulkan or opengl" >&2; exit 2 ;;
+esac
 
 absolute() { (cd "$(dirname "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")"); }
 cemu=$(absolute "$cemu")
@@ -76,12 +100,10 @@ if [ ! -x "$binary" ]; then
 	echo "$0: no Cemu at $binary" >&2
 	exit 2
 fi
-for file in wiiu/apps/halo.wuhb wiiu/apps/halo/halo.rpx; do
-	if [ ! -f "$package/$file" ]; then
-		echo "$0: $package has no $file (tools/wiiu_package.py --out DIR)" >&2
-		exit 2
-	fi
-done
+if [ ! -f "$package/wiiu/apps/halo.wuhb" ]; then
+	echo "$0: $package has no wiiu/apps/halo.wuhb (tools/wiiu_package.py --out DIR)" >&2
+	exit 2
+fi
 if [ ! -x "$maps_root" ]; then
 	echo "$0: no data root script at $maps_root" >&2
 	exit 2
@@ -95,7 +117,7 @@ fi
 rm -rf "$portable"
 mkdir -p "$portable"
 touch "$portable/.cemu-smoke"
-cat > "$portable/settings.xml" <<'EOF'
+cat > "$portable/settings.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <content>
     <logflag>2305843009214087172</logflag>
@@ -107,7 +129,7 @@ cat > "$portable/settings.xml" <<'EOF'
     <play_boot_sound>false</play_boot_sound>
     <window_size><x>640</x><y>400</y></window_size>
     <Graphic>
-        <api>1</api>
+        <api>$api</api>
         <VSync>0</VSync>
     </Graphic>
     <Audio>
@@ -124,7 +146,9 @@ card="$portable/sdcard"
 game="$card/wiiu/apps/halo"
 mkdir -p "$game/maps"
 cp "$package/wiiu/apps/halo.wuhb" "$card/wiiu/apps/halo.wuhb"
-cp "$package/wiiu/apps/halo/halo.rpx" "$game/halo.rpx"
+if [ -f "$package/wiiu/apps/halo/halo.rpx" ]; then
+	cp "$package/wiiu/apps/halo/halo.rpx" "$game/halo.rpx"
+fi
 data="$out/data"
 "$maps_root" "$data" > /dev/null
 linked=0
@@ -140,6 +164,32 @@ if [ ! -f "$game/maps/ui.map" ]; then
 fi
 echo "maps: $linked linked from $data/maps"
 
+# an X display for Cemu on Linux: the one given, or an Xvfb of the test's
+xvfb_pid=
+if [ "$(uname)" != Darwin ] && [ -z "$display" ]; then
+	command -v Xvfb > /dev/null || { echo "$0: no DISPLAY and no Xvfb" >&2; exit 2; }
+	number=290
+	while [ -e "/tmp/.X$number-lock" ]; do number=$((number + 1)); done
+	display=":$number"
+	Xvfb "$display" -screen 0 1280x720x24 -nolisten tcp > /dev/null 2>&1 &
+	xvfb_pid=$!
+	sleep 2
+fi
+if [ -n "$display" ]; then
+	export DISPLAY=$display
+fi
+if [ "$shots_every" != 0 ] && { [ "$(uname)" = Darwin ] || ! command -v import > /dev/null; }; then
+	echo "$0: no screenshots here (they need an X display and ImageMagick's import)" >&2
+	shots_every=0
+fi
+
+# a screenshot of the display (a phase's shots folder, the picture's name)
+screenshot() {
+	[ "$shots_every" != 0 ] || return 0
+	mkdir -p "$1"
+	import -display "$display" -window root "$1/$2.png" 2> /dev/null || true
+}
+
 cemu_pid=
 stop_cemu() {
 	if [ -n "$cemu_pid" ] && kill -0 "$cemu_pid" 2> /dev/null; then
@@ -152,7 +202,13 @@ stop_cemu() {
 	fi
 	cemu_pid=
 }
-trap stop_cemu EXIT
+finish() {
+	stop_cemu
+	if [ -n "$xvfb_pid" ]; then
+		kill "$xvfb_pid" 2> /dev/null || true
+	fi
+}
+trap finish EXIT
 
 # the port's newest frame number in Cemu's log (its "gl: frame N" reports), 0
 # for none yet
@@ -185,8 +241,10 @@ marked_in() {
 phase() {
 	local name=$1 init=$2 after=$3 mark=$4 hold=$5
 	local logs="$out/$name" started now result=fail reason="" marked=0 drawing=0 logs_found mark_frame=0 first_frame=0 last_frame=0
+	local shot=0 last_shot shader_failures
 	mkdir -p "$logs"
-	rm -rf "$game/logs" "$game/z"
+	rm -rf "$game/logs" "$game/z" "$logs/shots"
+	rm -f "$game"/failed[0-9][0-9].vert "$game"/failed[0-9][0-9].frag
 	rm -f "$game/port.txt" "$game/init.txt" "$portable/log.txt"
 	if [ -n "$init" ]; then
 		printf '%s\r\n' "$init" > "$game/init.txt"
@@ -195,12 +253,18 @@ phase() {
 	"$binary" --force-interpreter -g "$card/wiiu/apps/halo.wuhb" > "$logs/cemu.out" 2>&1 &
 	cemu_pid=$!
 	started=$(date +%s)
+	last_shot=$started
 	while :; do
 		sleep 5
 		now=$(date +%s)
 		if ! kill -0 "$cemu_pid" 2> /dev/null; then
 			reason="Cemu left"
 			break
+		fi
+		if [ "$shots_every" != 0 ] && [ $((now - last_shot)) -ge "$shots_every" ]; then
+			shot=$((shot + 1))
+			screenshot "$logs/shots" "$(printf '%03d' "$shot")-$((now - started))s"
+			last_shot=$now
 		fi
 		# (the game's debug.txt on the card, and Cemu's log, which has the
 		# port's console lines, debug.txt's among them, as they are written)
@@ -241,12 +305,25 @@ phase() {
 			break
 		fi
 	done
+	if kill -0 "$cemu_pid" 2> /dev/null; then
+		screenshot "$logs/shots" last
+	fi
 	stop_cemu
 	cp "$game/logs/debug.txt" "$logs/" 2> /dev/null || true
 	cp "$game/port.txt" "$game/config.toml" "$logs/" 2> /dev/null || true
 	cp "$portable/log.txt" "$logs/cemu-log.txt" 2> /dev/null || true
 	# (the port's last frame report, to show the game was drawing)
 	grep -h "gl: frame" "$logs/cemu-log.txt" 2> /dev/null | tail -1 | sed 's/.*gl: /  last frame report: /' | cut -c1-200 > "$logs/frames.txt" || true
+	# (shaders that did not compile: the game's line, and its copy of the
+	# source in the game's folder)
+	mv "$game"/failed[0-9][0-9].vert "$game"/failed[0-9][0-9].frag "$logs/" 2> /dev/null || true
+	shader_failures=$(grep -c "gl: a [a-z]* shader did not compile" "$logs/cemu-log.txt" 2> /dev/null || true)
+	shader_failures=${shader_failures:-0}
+	if [ "$result" = pass ] && [ "$shader_failures" -gt 0 ]; then
+		result=fail
+		reason="shader failure: $shader_failures shaders did not compile (the first: $(grep -m1 \
+			"gl: a [a-z]* shader did not compile" "$logs/cemu-log.txt" | sed 's/.*gl: /gl: /' | cut -c1-200))"
+	fi
 	if [ "$result" = pass ]; then
 		echo "$name: PASS ($(( $(date +%s) - started )) s; frames $first_frame to $last_frame in the $hold s)" | tee "$logs/result.txt"
 		cat "$logs/frames.txt" | tee -a "$logs/result.txt"
@@ -257,10 +334,13 @@ phase() {
 }
 
 status=0
+rm -f "$out/summary.txt"
 phase menu "" "" "starting main menu music" 10 || status=1
+head -1 "$out/menu/result.txt" >> "$out/summary.txt"
 # (the map: the game's init.txt; it is in once its scripts are read, which
 # follows its tags and its structure bsp)
 phase map "map_name $map" "starting precaching of map '${map##*\\}'" "scenario scripts:" "$seconds" || status=1
+head -1 "$out/map/result.txt" >> "$out/summary.txt"
 rm -rf "$data"
 if [ "$status" = 0 ]; then
 	echo "cemu smoke: PASS (Cemu only; not a Wii U)"
