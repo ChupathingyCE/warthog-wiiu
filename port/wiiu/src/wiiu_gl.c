@@ -96,6 +96,7 @@ the first time.
 #include "wiiu_port.h"
 #include "wiiu_gx2.h"
 #include "wiiu_shader_cache.h"
+#include "wiiu_shader_finite.h"
 
 #ifndef APIENTRY
 #define APIENTRY
@@ -2070,9 +2071,27 @@ static char *shader_text(const char *source, int vertex)
 	char *text = malloc(size * 2 + 4096);
 	const char *line = source;
 	char *out = text;
+	char *finite = NULL;
 
 	if (!text)
 		return NULL;
+	/* (a vertex shader's nv2a_finite given back as it is: wiiu_shader_finite.c;
+	a miss fails the shader, never draws it with the test left in) */
+	if (vertex)
+	{
+		char error[160];
+		int rewritten;
+
+		finite = wiiu_shader_finite_passthrough(source, &rewritten, error, sizeof(error));
+		if (!finite)
+		{
+			if (error[0])
+				wiiu_log("gl: a vertex shader was not compiled: %s", error);
+			free(text);
+			return NULL;
+		}
+		line = source = finite;
+	}
 	while (*line)
 	{
 		const char *end = strchr(line, '\n');
@@ -2122,6 +2141,7 @@ static char *shader_text(const char *source, int vertex)
 		line += length;
 	}
 	*out = '\0';
+	free(finite);
 	debug_load();
 	if (!vertex && debug.math_cubes)
 	{
@@ -2242,7 +2262,10 @@ static int shader_compile(struct shader *shader)
 		return 0;
 	text = shader_text(shader->source, vertex);
 	if (!text)
+	{
+		snprintf(shader->log, sizeof(shader->log), "the GL layer could not prepare this shader (port.txt says why)");
 		return 0;
+	}
 	debug_load();
 	if (!vertex && !debug.native_cubes)
 		shader_cube_arrays(text, &shader->cube_arrays);
