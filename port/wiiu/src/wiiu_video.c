@@ -73,6 +73,9 @@ dedicated server does. The log's text screens (wiiu_screen.c) are let go when GX
 static int video_state; /* 0 not started, 1 up, -1 failed or shut down */
 static int video_foreground;
 static int video_screens_enabled;
+/* console.frame_overlap (wiiu_video_set_overlap) */
+static int video_overlap;
+static void video_frame_wait(void);
 static void *command_buffer_pool;
 static GX2TVRenderMode tv_render_mode;
 static GX2DrcRenderMode drc_render_mode;
@@ -228,6 +231,11 @@ static uint32_t video_release(void *context)
 	(void)context;
 	if (video_state != 1 || !video_foreground)
 		return 0;
+	/* (console.frame_overlap leaves the last swap's flip to come: it is
+	waited for, as every frame's is without it, before its scan buffers
+	are let go) */
+	if (video_overlap)
+		video_frame_wait();
 	GX2DrawDone();
 	heap_free(heap_foreground, tv_scan_buffer);
 	heap_free(heap_foreground, drc_scan_buffer);
@@ -460,6 +468,17 @@ void wiiu_video_swap(void)
 {
 	if (video_state != 1 || !video_foreground)
 		return;
+	/* (console.frame_overlap: the frame before's flip waited for here,
+	before this one's copy, so that one swap at most is ever queued and the
+	next frame's own work runs while the GPU draws this one and its flip
+	comes. SDL's Wii U renderer (WIIU_SDL_RenderPresent, WIIU_FrameDone in
+	devkitPro/SDL wiiu-sdl2-2.28) never waits for a flip: it waits only
+	for the frame before last on the GPU, as wiiu_gl_frame_end does here.
+	This waits for that and for the frame before's flip, before this
+	frame's commands touch the scan buffers, as libwhb's
+	WHBGfxBeginRender does.) */
+	if (video_overlap)
+		video_frame_wait();
 	wiiu_gl_step("the copy to the screens");
 	GX2CopyColorBufferToScanBuffer(&color_buffer, GX2_SCAN_TARGET_TV);
 	GX2CopyColorBufferToScanBuffer(&color_buffer, GX2_SCAN_TARGET_DRC);
@@ -476,7 +495,18 @@ void wiiu_video_swap(void)
 		video_screens_enabled = 1;
 		wiiu_log("video: the first frame shown");
 	}
-	video_frame_wait();
+	if (!video_overlap)
+		video_frame_wait();
+}
+
+void wiiu_video_set_overlap(int overlap)
+{
+	overlap = overlap != 0;
+	if (overlap != video_overlap)
+		wiiu_log("video: %s", overlap ?
+			"the next frame starts while this one is drawn (console.frame_overlap)" :
+			"each frame waits to be shown before the next starts");
+	video_overlap = overlap;
 }
 
 /* (every frame, from the system's events, while the game draws nothing:

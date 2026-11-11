@@ -20,6 +20,12 @@
 #             levels\test\bloodgulch\bloodgulch)
 # --seconds   how long the map runs once it is loaded (default 60)
 # --timeout   the longest a phase may take to reach its mark (default 900)
+# --variant   the game type the second boot plays its map with (the game's
+#             game_variant names: slayer, team_slayer, ctf...), a match
+#             of one player; default none, the map alone
+# --config    a config.toml to start from, copied into the game's folder of
+#             the test's SD card before each boot (default: none, the
+#             game's own defaults)
 # --renderer  Cemu's graphics API: vulkan (the default) or opengl
 # --display   an X display to run on (Linux); without DISPLAY, the test
 #             starts its own Xvfb
@@ -79,6 +85,8 @@ maps_root="$HOME/halo-maps/new-data-root.sh"
 map='levels\test\bloodgulch\bloodgulch'
 seconds=60
 timeout=900
+config=
+variant=
 renderer=vulkan
 display=${DISPLAY:-}
 shots_every=15
@@ -96,6 +104,8 @@ while [ $# -gt 0 ]; do
 		--map) map=$2; shift 2 ;;
 		--seconds) seconds=$2; shift 2 ;;
 		--timeout) timeout=$2; shift 2 ;;
+		--config) config=$2; shift 2 ;;
+		--variant) variant=$2; shift 2 ;;
 		--renderer) renderer=$2; shift 2 ;;
 		--display) display=$2; shift 2 ;;
 		--shots-every) shots_every=$2; shift 2 ;;
@@ -107,7 +117,7 @@ while [ $# -gt 0 ]; do
 	esac
 done
 if [ -z "$cemu" ] || [ -z "$package" ] || [ -z "$out" ]; then
-	echo "usage: $0 --cemu PATH --package DIR --out DIR [--maps-root SCRIPT] [--map NAME] [--seconds N] [--timeout N] [--renderer NAME] [--display DISPLAY] [--shots-every N] [--baseline DIR] [--save-baseline DIR] [--max-difference N] [--only menu|map]" >&2
+	echo "usage: $0 --cemu PATH --package DIR --out DIR [--maps-root SCRIPT] [--map NAME] [--seconds N] [--timeout N] [--config FILE] [--variant NAME] [--renderer NAME] [--display DISPLAY] [--shots-every N] [--baseline DIR] [--save-baseline DIR] [--max-difference N] [--only menu|map]" >&2
 	exit 2
 fi
 
@@ -403,7 +413,14 @@ phase() {
 	rm -f "$game"/failed[0-9][0-9].vert "$game"/failed[0-9][0-9].frag
 	rm -f "$game/port.txt" "$game/init.txt" "$portable/log.txt"
 	if [ -n "$init" ]; then
-		printf '%s\r\n' "$init" > "$game/init.txt"
+		: > "$game/init.txt"
+		if [ -n "$variant" ]; then
+			printf 'game_variant %s\r\n' "$variant" >> "$game/init.txt"
+		fi
+		printf '%s\r\n' "$init" >> "$game/init.txt"
+	fi
+	if [ -n "$config" ]; then
+		cp "$config" "$game/config.toml"
 	fi
 	echo "$name: starting Cemu"
 	# (full screen when the screenshots are compared: the screen is the game's)
