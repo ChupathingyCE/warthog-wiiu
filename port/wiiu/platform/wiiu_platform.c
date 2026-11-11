@@ -123,6 +123,14 @@ void platform_video_window_size(int *width, int *height)
 
 void platform_video_swap(void)
 {
+	static unsigned long read_at = (unsigned long)-1;
+
+	/* (console.frame_overlap, read again when the settings change) */
+	if (read_at != config_changes())
+	{
+		read_at = config_changes();
+		wiiu_video_set_overlap(config_boolean("console.frame_overlap"));
+	}
 	wiiu_video_swap();
 }
 

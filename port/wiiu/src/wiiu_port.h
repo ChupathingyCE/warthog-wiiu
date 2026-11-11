@@ -65,6 +65,9 @@ with the game's device, cleared every frame while the game draws nothing
 #define WIIU_SCREEN_HEIGHT 720
 int wiiu_video_initialize(void);
 void wiiu_video_swap(void);
+/* the next frame started while this one is drawn and waits for its flip
+(console.frame_overlap), or after it is shown (0, the default) */
+void wiiu_video_set_overlap(int overlap);
 void wiiu_video_idle(void);
 void wiiu_video_shutdown(void);
 
