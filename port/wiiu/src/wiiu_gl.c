@@ -2064,6 +2064,10 @@ static void shader_cube_arrays(char *text, unsigned long *cube_arrays)
 	}
 }
 
+/* the line of the game's nv2a_finite (xgpu.h's NV2A_FINITE) that tests a
+float's bits: shader_text gives it an isnan test instead */
+#define NV2A_FINITE_BITS_TEST "return mix(v, vec4(0.0), greaterThan(floatBitsToUint(v)"
+
 static char *shader_text(const char *source, int vertex)
 {
 	size_t size = strlen(source);
@@ -2116,6 +2120,19 @@ static char *shader_text(const char *source, int vertex)
 						out += sprintf(out, "layout(location = %d) ", location);
 				}
 			}
+		}
+		/* (the game's nv2a_finite, xgpu.h: a component that is not a
+		number made 0 by its bits, with floatBitsToUint and a uvec4 compare.
+		Built by CafeGLSL, that drew the textured world flat and untextured
+		in Cemu, every texture coordinate going through it. Here it tests
+		each component with isnan instead, as the Xbox 360's HLSL does
+		(warthog-360 x360_glsl.c); an infinite value is kept, as there) */
+		if (!strncmp(word, NV2A_FINITE_BITS_TEST, sizeof(NV2A_FINITE_BITS_TEST) - 1))
+		{
+			out += sprintf(out, "\treturn vec4(isnan(v.x) ? 0.0 : v.x, isnan(v.y) ? 0.0 : v.y, "
+				"isnan(v.z) ? 0.0 : v.z, isnan(v.w) ? 0.0 : v.w);\n");
+			line += length;
+			continue;
 		}
 		memcpy(out, line, length);
 		out += length;
