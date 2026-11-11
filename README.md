@@ -22,6 +22,9 @@ multiplayer maps and online games on real consoles. The newest one, on the
 0.9.0 game, has so far run in the Cemu emulator only. The campaign hasn't
 been tested yet.
 
+The newest test build is test build 3 (November 6). The port has moved on
+since then: 32 players and newer game fixes come with the next test build.
+
 Get the newest test build from [Releases](https://github.com/ChupathingyCE/warthog-wiiu/releases).
 
 You need your own copy of Halo. No game files are included.
@@ -51,7 +54,9 @@ settings stay.
 - The menus, and the multiplayer maps offline.
 - **Online Games:** the [C] Warthog servers and community servers. It joins
   OpenCE's newest servers (network version 41) and older ones.
-- **Up to 32 players.** Online Games lists only the servers that fit.
+- **Players:** test build 3 holds 16. Builds from November 10 on hold 32.
+  Online Games lists only the servers that fit, and says so when a game is
+  too big.
 - **Controllers:** the GamePad and the Pro Controller. A accepts, B goes
   back.
 - **Split screen:** when you join a game in progress, the host waits a few
@@ -66,8 +71,8 @@ settings stay.
 
 On Online Games, press + (Start) to open DELTA PROFILE, then A for a code.
 Enter it at stats.chupathingy.org/connect, signed in on your phone or
-computer (or scan the QR code), then press A on the Wii U to confirm. Your
-games then count toward your profile. The Wii U makes its own key for this
+computer (or scan the QR code), then press A on the Wii U to confirm. Delta
+servers you join then know your profile. The Wii U makes its own key for this
 (`wiiu/apps/halo/delta_device.key` on the SD card); nothing secret is sent.
 Keep that file to yourself. Unlink on the site's profile page.
 
@@ -77,10 +82,54 @@ Keep that file to yourself. Unlink on the site's profile page.
   this is being worked on.
 - The campaign has not been tested yet.
 - No movies: they are skipped.
-- A game that grows past 32 players is left, as a full one is.
+- A game that grows past the build's player count is left, as a full one is.
 - The picture is slightly inset from the edges of the TV.
 - On some capture cards the TV picture may not fit until you press HOME once;
   regular TVs are fine.
+
+## Settings
+
+The settings are in `wiiu/apps/halo/config.toml` on the SD card, beside
+`halo.rpx`. The first start writes it with every setting, commented out at
+its default. To change one:
+
+1. Put the SD card in your computer and open `config.toml`.
+2. Remove the `# ` in front of the setting.
+3. Change its value and save.
+4. Put the card back and start the game.
+
+The Wii U reads the same settings as the PC builds. These are the ones most
+worth knowing on the Wii U:
+
+| Setting | What it does |
+| --- | --- |
+| `display.interpolation` | `true` (the default) draws a frame for every TV refresh. `false` keeps the game's own 30 frames a second. |
+| `display.field_of_view` | The field of view in degrees, from 50 to 120. The Xbox used 70. |
+| `display.dynamic_light_limit` | The most dynamic lights at once. The default on the Wii U is 8. `0` means no limit, as on the Xbox. |
+| `display.specular_light_limit` | Of those lights, the most that also add shine. The default on the Wii U is 2. |
+| `display.particle_limit` | The most particles at once. The Xbox's limit was 1024. |
+| `audio.music_volume`, `audio.effects_volume` | The volumes, from 0.0 to 1.0. |
+| `network.online` | Internet play. Online Games needs it on (the default). |
+| `console.perf_log` | `true` writes a line a second to `debug.txt` with the frame time. For finding what makes a scene slow. |
+| `debug.gpu_stats` | `true` adds the GPU's share of each frame to `port.txt`. Off by default. |
+
+The `console.*` settings of the original Xbox, such as `bypass_security`
+and `trace`, are not read on the Wii U.
+
+## Troubleshooting
+
+- **Online Games says it can't reach the game list.** Check that the Wii U
+  is online in System Settings. Then send `port.txt` (below).
+- **"Internet play is off."** Set `network.online = true` in `config.toml`.
+- **You join, then land back at the menu.** The server's map is missing.
+  Copy that map into `wiiu/apps/halo/maps`, or pick a server on a map you
+  have.
+- **"This game has more players than this console can hold."** Pick a
+  smaller game.
+- **The screen stays dark at start.** Hold the power button to turn the
+  Wii U off fully, then start the game again.
+- **Hitches in the first minute of a map.** The first run of a map makes
+  its shaders. Later runs read them from the SD card.
 
 ## Reporting problems
 
@@ -99,6 +148,8 @@ Keep that file to yourself. Unlink on the site's profile page.
   prefix header), `src/` (the console layer), and a README with its requirements.
 - `tools/wiiu_package.py`: lays out the build for an SD card (Aroma, at
   `sd:/wiiu/apps/halo/`) or for Cemu.
+- `port/wiiu/docs/hardware-test.md`: the checklist for a test run on a
+  console, and what the logs should say.
 - `tools/cemu_smoke.sh`: a smoke test in Cemu 2.6 or later. It boots the
   package to the main menu, then into Blood Gulch for 60 seconds, with your
   own maps linked, never copied. A pass in Cemu is not a pass on a Wii U.

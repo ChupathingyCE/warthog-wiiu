@@ -8,7 +8,8 @@ is `logs/debug.txt`.
 
 - `halo.wuhb` in `sd:/wiiu/apps/`, `halo.rpx` and `maps/` (NTSC
   01.10.12.2276) in `sd:/wiiu/apps/halo/`.
-- No `gl.txt` for a normal run: every switch off, the log small.
+- No `gl.txt` for a normal run: every switch off, the log small. (Only a
+  build configured with `--wiiu-gl-switches` reads it.)
 - Main menu: no `init.txt`. Blood Gulch: rename `init-bloodgulch.txt` to
   `init.txt` (it holds `map_name levels\test\bloodgulch\bloodgulch`), and
   rename it back for the main menu.
@@ -137,6 +138,9 @@ Send back `port.txt` (and `logs/debug.txt` if the game stopped).
   answered (counted as nothing seen).
 
 ## If something is off: gl.txt
+
+These switches work only in a build configured with `--wiiu-gl-switches`.
+Test builds and nightly builds never read `gl.txt`.
 
 Put words in `sd:/wiiu/apps/halo/gl.txt` (one or more, separated by spaces
 or lines), one change a run where possible.
