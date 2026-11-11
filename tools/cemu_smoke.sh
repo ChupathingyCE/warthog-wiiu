@@ -19,6 +19,9 @@
 #             levels\test\bloodgulch\bloodgulch)
 # --seconds   how long the map runs once it is loaded (default 60)
 # --timeout   the longest a phase may take to reach its mark (default 900)
+# --config    a config.toml to start from, copied into the game's folder of
+#             the test's SD card before each boot (default: none, the
+#             game's own defaults)
 #
 # The first boot passes when the game starts the main menu's music and draws
 # on for 10 s; the second when the map has loaded (its scripts read) and the
@@ -42,6 +45,7 @@ maps_root="$HOME/halo-maps/new-data-root.sh"
 map='levels\test\bloodgulch\bloodgulch'
 seconds=60
 timeout=900
+config=
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -52,11 +56,12 @@ while [ $# -gt 0 ]; do
 		--map) map=$2; shift 2 ;;
 		--seconds) seconds=$2; shift 2 ;;
 		--timeout) timeout=$2; shift 2 ;;
+		--config) config=$2; shift 2 ;;
 		*) echo "$0: unknown argument $1" >&2; exit 2 ;;
 	esac
 done
 if [ -z "$cemu" ] || [ -z "$package" ] || [ -z "$out" ]; then
-	echo "usage: $0 --cemu PATH --package DIR --out DIR [--maps-root SCRIPT] [--map NAME] [--seconds N] [--timeout N]" >&2
+	echo "usage: $0 --cemu PATH --package DIR --out DIR [--maps-root SCRIPT] [--map NAME] [--seconds N] [--timeout N] [--config FILE]" >&2
 	exit 2
 fi
 
@@ -190,6 +195,9 @@ phase() {
 	rm -f "$game/port.txt" "$game/init.txt" "$portable/log.txt"
 	if [ -n "$init" ]; then
 		printf '%s\r\n' "$init" > "$game/init.txt"
+	fi
+	if [ -n "$config" ]; then
+		cp "$config" "$game/config.toml"
 	fi
 	echo "$name: starting Cemu"
 	"$binary" --force-interpreter -g "$card/wiiu/apps/halo.wuhb" > "$logs/cemu.out" 2>&1 &
