@@ -237,6 +237,17 @@ if [ -n "$baseline" ] || [ -n "$save_baseline" ]; then
 		echo "$0: --baseline and --save-baseline need ImageMagick (magick or convert)" >&2
 		exit 2
 	fi
+	if [ -n "$baseline" ] && [ -n "$save_baseline" ] && [ -d "$baseline" ] &&
+		[ "$(cd "$baseline" && pwd -P)" = "$(mkdir -p "$save_baseline" && cd "$save_baseline" && pwd -P)" ]; then
+		echo "$0: --baseline and --save-baseline are the same folder" >&2
+		exit 2
+	fi
+	# (a new baseline replaces the phase's old signatures, never mixes with them)
+	if [ -n "$save_baseline" ]; then
+		for name in menu map; do
+			case "$only" in ''|"$name") rm -f "$save_baseline/$name"-[0-9][0-9][0-9].sig ;; esac
+		done
+	fi
 	for name in menu map; do
 		case "$only" in ''|"$name") ;; *) continue ;; esac
 		if [ -n "$baseline" ] && ! ls "$baseline/$name"-[0-9][0-9][0-9].sig > /dev/null 2>&1; then
@@ -249,7 +260,7 @@ fi
 # a picture's signature: the screen averaged into 32x18 cells, a line of
 # 32 colors (rrggbb) a row
 signature() {
-	$convert "$1" -resize '32x18!' -depth 8 txt:- |
+	$convert "$1" -colorspace sRGB -type TrueColor -resize '32x18!' -depth 8 txt:- |
 		awk -F'[(),: ]+' '/^[0-9]/ { cell[$2 "," $1] = sprintf("%02x%02x%02x", $3, $4, $5) }
 			END { print "# cemu_smoke.sh picture signature: 32x18 cells, rrggbb"
 				for (y = 0; y < 18; y++) { line = ""; for (x = 0; x < 32; x++) line = line (x ? " " : "") cell[y "," x]; print line } }'
@@ -288,6 +299,11 @@ compare_pictures() {
 		[ -s "$picture" ] || continue
 		sig="${picture%.png}.sig"
 		signature "$picture" > "$sig"
+		# (a signature without its 576 colors: ImageMagick read nothing)
+		if [ "$(grep -v '^#' "$sig" | wc -w)" -ne 576 ]; then
+			echo "the signature of $(basename "$picture") is empty or short (ImageMagick could not read it)" > "$logs/pictures.txt"
+			return 1
+		fi
 		count=$((count + 1))
 		if [ -n "$save_baseline" ]; then
 			mkdir -p "$save_baseline"
