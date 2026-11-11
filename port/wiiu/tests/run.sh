@@ -7,7 +7,8 @@
 #                                number it announces), and that the build
 #                                and the game take the Delta path, and
 #                                that the GL layer has every function the
-#                                game's renderer loads
+#                                game's renderer loads, and that a vertex
+#                                shader's nv2a_finite is rewritten or fails
 #
 # CC picks the compiler (default: cc). The binaries go to build/wiiu-tests.
 # Run from this repository, with the game in chupathingyce/ (git submodule
@@ -32,6 +33,18 @@ $CC -std=c89 -pedantic -Wall -Wextra -Werror $SAN $CONSOLE \
 	-I$G/port/linux/src -idirafter $G/port/linux/include port/wiiu/tests/delta_join_test.c \
 	$G/port/linux/src/delta_compat.c -o "$OUT/delta_join_test"
 "$OUT/delta_join_test"
+# a vertex shader's nv2a_finite is given back as it is, from the game's own
+# text of it (xgpu.h's NV2A_FINITE), and any other spelling fails the shader
+# (wiiu_shader_finite.c; a game from before #985 has none to check)
+if grep -q '^#define NV2A_FINITE \\$' "$G/port/linux/src/xgpu.h"; then
+	awk '/^#define NV2A_FINITE \\$/ { on = 1 } on { print } on && !/\\$/ { exit }' \
+		"$G/port/linux/src/xgpu.h" > "$OUT/nv2a_finite_text.h"
+	$CC -std=c89 -pedantic -Wall -Wextra -Werror $SAN -Iport/wiiu/src -I"$OUT" \
+		port/wiiu/tests/shader_finite_test.c port/wiiu/src/wiiu_shader_finite.c -o "$OUT/shader_finite_test"
+	"$OUT/shader_finite_test"
+else
+	echo "$0: the game has no NV2A_FINITE in xgpu.h: the vertex shader rewrite is not checked"
+fi
 # every GL function the game's renderer loads is in the GL layer's table, or
 # the game stops at gl_functions_load with a black screen (the game's
 # tools/console_gl_check.py; a game from before it has none to run)

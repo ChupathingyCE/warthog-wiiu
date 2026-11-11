@@ -96,6 +96,7 @@ the first time.
 #include "wiiu_port.h"
 #include "wiiu_gx2.h"
 #include "wiiu_shader_cache.h"
+#include "wiiu_shader_finite.h"
 
 #ifndef APIENTRY
 #define APIENTRY
@@ -2064,29 +2065,33 @@ static void shader_cube_arrays(char *text, unsigned long *cube_arrays)
 	}
 }
 
-/* the game's nv2a_finite (xgpu.h): a component that is not a number made 0.
-In a vertex shader, any test there (the game's by the float's bits, isnan, or
-the bits compared one component at a time) drew the main menu without its
-logo and items, and Blood Gulch's sky hazed over without its stars, in Cemu
-on Linux (game 53d267269, #985), and the world flat and untextured in Cemu on
-macOS. The pixel shaders' test draws right, so it stays. A vertex shader's
-nv2a_finite gives its value back as it is: the game already makes a vertex
-constant that is not a number 0 before it gets here (d3d8_gl.c
-constants_store), and the lights that made them are refused
-(rasterizer_lights.c), so the GPU has little left to catch there. */
-#define NV2A_FINITE_FUNCTION "vec4 nv2a_finite(vec4 v)"
-
 static char *shader_text(const char *source, int vertex)
 {
 	size_t size = strlen(source);
 	char *text = malloc(size * 2 + 4096);
 	const char *line = source;
 	char *out = text;
-	/* in a vertex shader's nv2a_finite: 1 at its name, 2 in its body */
-	int in_finite = 0;
+	char *finite = NULL;
 
 	if (!text)
 		return NULL;
+	/* (a vertex shader's nv2a_finite given back as it is: wiiu_shader_finite.c;
+	a miss fails the shader, never draws it with the test left in) */
+	if (vertex)
+	{
+		char error[160];
+		int rewritten;
+
+		finite = wiiu_shader_finite_passthrough(source, &rewritten, error, sizeof(error));
+		if (!finite)
+		{
+			if (error[0])
+				wiiu_log("gl: a vertex shader was not compiled: %s", error);
+			free(text);
+			return NULL;
+		}
+		line = source = finite;
+	}
 	while (*line)
 	{
 		const char *end = strchr(line, '\n');
@@ -2096,24 +2101,6 @@ static char *shader_text(const char *source, int vertex)
 
 		while (*word == ' ' || *word == '\t')
 			word++;
-		if (vertex && !in_finite && !strncmp(word, NV2A_FINITE_FUNCTION, sizeof(NV2A_FINITE_FUNCTION) - 1))
-			in_finite = 1;
-		else if (in_finite == 1 && *word == '{')
-			in_finite = 2;
-		else if (in_finite == 2)
-		{
-			/* (its body: the value as it is, and the closing brace) */
-			if (*word == '}')
-			{
-				out += sprintf(out, "\treturn v;\n");
-				in_finite = 0;
-			}
-			else
-			{
-				line += length;
-				continue;
-			}
-		}
 		/* (interpolation qualifiers first) */
 		if (!strncmp(word, "flat ", 5))
 			word += 5;
@@ -2154,6 +2141,7 @@ static char *shader_text(const char *source, int vertex)
 		line += length;
 	}
 	*out = '\0';
+	free(finite);
 	debug_load();
 	if (!vertex && debug.math_cubes)
 	{
@@ -2274,7 +2262,10 @@ static int shader_compile(struct shader *shader)
 		return 0;
 	text = shader_text(shader->source, vertex);
 	if (!text)
+	{
+		snprintf(shader->log, sizeof(shader->log), "the GL layer could not prepare this shader (port.txt says why)");
 		return 0;
+	}
 	debug_load();
 	if (!vertex && !debug.native_cubes)
 		shader_cube_arrays(text, &shader->cube_arrays);
