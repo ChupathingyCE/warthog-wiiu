@@ -27,9 +27,21 @@
 #             runs, and one more at its end, in the phase's shots folder
 #             (default 15; 0 for none). Needs an X display and ImageMagick's
 #             import, so none on macOS
+# --baseline  a folder of picture signatures (menu-NNN.sig and map-NNN.sig,
+#             from --save-baseline on a build that looks right): a phase
+#             fails when every screenshot taken while it draws is further
+#             than --max-difference from all of its signatures, as a flat,
+#             untextured world or a main menu without its logo and items
+#             is. Needs the screenshots, with ImageMagick (magick, or 6's
+#             convert)
+# --save-baseline  write the signatures of the screenshots each phase took
+#             while it drew to that folder, for a build that looks right
+# --max-difference  the largest difference from a signature that passes,
+#             0 to 1 (default 0.01)
+# --only      one phase: menu or map (default both)
 #
 # The first boot passes when the game starts the main menu's music and draws
-# on for 10 s; the second when the map has loaded (its scripts read) and the
+# on for 10 s (30 s with --baseline or --save-baseline); the second when the map has loaded (its scripts read) and the
 # game has drawn it for --seconds, from its first frame after its shaders,
 # without a halt. Either fails on the game's EXCEPTION halt, on Cemu
 # leaving, on the time running out, on no frames drawn, or on a shader that
@@ -44,6 +56,19 @@
 # game's folder of the test's SD card. It is the test's: the player's card
 # is never touched. No game files are in this repository or in the logs.
 #
+# A signature is the screen averaged into a grid of 32x18 colors, written
+# as text: it keeps no picture of the game. The difference of two is the mean
+# over the cells of each cell's color difference, 0 to 1. Cemu on Linux
+# (Vulkan on llvmpipe, 2026-11-11) put a good build's pictures within 0.003
+# of the baseline; the menu without its logo and items was 0.039 off or more,
+# and the hazed sky of the same regression 0.020. While a phase draws, from
+# 10 s in, a screenshot is taken every 5 s, Cemu is full screen, and the
+# closest pair of a screenshot and a baseline signature
+# counts (the menu's background moves, so a baseline is several); compare.png
+# in the phase's folder shows the baseline's grid, this run's and its
+# screenshot side by side. Signatures are of one Cemu, renderer and display
+# size: make them on the machine that compares.
+#
 # A pass here is a pass in Cemu, not on a Wii U.
 set -euo pipefail
 
@@ -57,6 +82,10 @@ timeout=900
 renderer=vulkan
 display=${DISPLAY:-}
 shots_every=15
+baseline=
+save_baseline=
+max_difference=0.01
+only=
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -70,13 +99,22 @@ while [ $# -gt 0 ]; do
 		--renderer) renderer=$2; shift 2 ;;
 		--display) display=$2; shift 2 ;;
 		--shots-every) shots_every=$2; shift 2 ;;
+		--baseline) baseline=$2; shift 2 ;;
+		--save-baseline) save_baseline=$2; shift 2 ;;
+		--max-difference) max_difference=$2; shift 2 ;;
+		--only) only=$2; shift 2 ;;
 		*) echo "$0: unknown argument $1" >&2; exit 2 ;;
 	esac
 done
 if [ -z "$cemu" ] || [ -z "$package" ] || [ -z "$out" ]; then
-	echo "usage: $0 --cemu PATH --package DIR --out DIR [--maps-root SCRIPT] [--map NAME] [--seconds N] [--timeout N]" >&2
+	echo "usage: $0 --cemu PATH --package DIR --out DIR [--maps-root SCRIPT] [--map NAME] [--seconds N] [--timeout N] [--renderer NAME] [--display DISPLAY] [--shots-every N] [--baseline DIR] [--save-baseline DIR] [--max-difference N] [--only menu|map]" >&2
 	exit 2
 fi
+
+case "$only" in
+	''|menu|map) ;;
+	*) echo "$0: --only is menu or map" >&2; exit 2 ;;
+esac
 
 case "$renderer" in
 	vulkan) api=1 ;;
@@ -183,6 +221,123 @@ if [ "$shots_every" != 0 ] && { [ "$(uname)" = Darwin ] || ! command -v import >
 	shots_every=0
 fi
 
+# the pictures' signatures: ImageMagick 7's magick, or 6's convert
+comparing=0
+if [ -n "$baseline" ] || [ -n "$save_baseline" ]; then
+	comparing=1
+	if [ "$shots_every" = 0 ]; then
+		echo "$0: --baseline and --save-baseline need the screenshots (an X display and ImageMagick's import)" >&2
+		exit 2
+	fi
+	if command -v magick > /dev/null; then
+		convert=magick
+	elif command -v convert > /dev/null; then
+		convert=convert
+	else
+		echo "$0: --baseline and --save-baseline need ImageMagick (magick or convert)" >&2
+		exit 2
+	fi
+	if [ -n "$baseline" ] && [ -n "$save_baseline" ] && [ -d "$baseline" ] &&
+		[ "$(cd "$baseline" && pwd -P)" = "$(mkdir -p "$save_baseline" && cd "$save_baseline" && pwd -P)" ]; then
+		echo "$0: --baseline and --save-baseline are the same folder" >&2
+		exit 2
+	fi
+	# (a new baseline replaces the phase's old signatures, never mixes with them)
+	if [ -n "$save_baseline" ]; then
+		for name in menu map; do
+			case "$only" in ''|"$name") rm -f "$save_baseline/$name"-[0-9][0-9][0-9].sig ;; esac
+		done
+	fi
+	for name in menu map; do
+		case "$only" in ''|"$name") ;; *) continue ;; esac
+		if [ -n "$baseline" ] && ! ls "$baseline/$name"-[0-9][0-9][0-9].sig > /dev/null 2>&1; then
+			echo "$0: no $baseline/$name-NNN.sig (--save-baseline DIR on a build that looks right)" >&2
+			exit 2
+		fi
+	done
+fi
+
+# a picture's signature: the screen averaged into 32x18 cells, a line of
+# 32 colors (rrggbb) a row
+signature() {
+	$convert "$1" -colorspace sRGB -type TrueColor -resize '32x18!' -depth 8 txt:- |
+		awk -F'[(),: ]+' '/^[0-9]/ { cell[$2 "," $1] = sprintf("%02x%02x%02x", $3, $4, $5) }
+			END { print "# cemu_smoke.sh picture signature: 32x18 cells, rrggbb"
+				for (y = 0; y < 18; y++) { line = ""; for (x = 0; x < 32; x++) line = line (x ? " " : "") cell[y "," x]; print line } }'
+}
+
+# the difference of two signatures, 0 to 1: the mean over the cells of each
+# cell's mean color difference
+difference() {
+	awk 'function channel(hex, k) { return index("0123456789abcdef", substr(hex, k, 1)) * 16 + index("0123456789abcdef", substr(hex, k + 1, 1)) - 17 }
+		FNR == 1 { file++ } /^#/ { next } { for (i = 1; i <= NF; i++) cell[file, FNR, i] = $i; rows[file] = FNR; cols = NF }
+		END {
+			total = 0; count = 0
+			for (y = 2; y <= rows[1]; y++) for (x = 1; x <= cols; x++) {
+				d = 0
+				for (k = 1; k <= 5; k += 2) { v = channel(cell[1, y, x], k) - channel(cell[2, y, x], k); d += v < 0 ? -v : v }
+				total += d / 3 / 255; count++
+			}
+			printf "%.4f\n", count ? total / count : 1
+		}' "$1" "$2"
+}
+
+# a signature drawn as a picture, each cell a 20x20 square (640x360)
+signature_picture() {
+	awk 'function channel(hex, k) { return index("0123456789abcdef", substr(hex, k, 1)) * 16 + index("0123456789abcdef", substr(hex, k + 1, 1)) - 17 }
+		BEGIN { print "P3"; print "32 18"; print "255" } /^#/ { next }
+		{ for (i = 1; i <= NF; i++) printf "%d %d %d\n", channel($i, 1), channel($i, 3), channel($i, 5) }' "$1" |
+		$convert ppm:- -filter point -resize '640x360!' "$2"
+}
+
+# a phase's screenshots taken while it drew (drawn-*.png in its shots folder)
+# against its baseline signatures (name, the phase's folder): the closest
+# pair counts. Fails when even that one is too far; pictures.txt says how far
+compare_pictures() {
+	local name=$1 logs=$2 picture sig reference difference_now best="" best_reference="" best_difference="" count=0
+	for picture in "$logs"/shots/drawn-*.png; do
+		[ -s "$picture" ] || continue
+		sig="${picture%.png}.sig"
+		signature "$picture" > "$sig"
+		# (a signature without its 576 colors: ImageMagick read nothing)
+		if [ "$(grep -v '^#' "$sig" | wc -w)" -ne 576 ]; then
+			echo "the signature of $(basename "$picture") is empty or short (ImageMagick could not read it)" > "$logs/pictures.txt"
+			return 1
+		fi
+		count=$((count + 1))
+		if [ -n "$save_baseline" ]; then
+			mkdir -p "$save_baseline"
+			cp "$sig" "$save_baseline/$name-$(printf '%03d' "$count").sig"
+		fi
+		[ -n "$baseline" ] || continue
+		for reference in "$baseline/$name"-[0-9][0-9][0-9].sig; do
+			difference_now=$(difference "$reference" "$sig")
+			if [ -z "$best" ] || awk -v a="$difference_now" -v b="$best_difference" 'BEGIN { exit !(a < b) }'; then
+				best=$picture
+				best_reference=$reference
+				best_difference=$difference_now
+			fi
+		done
+	done
+	if [ "$count" = 0 ]; then
+		echo "no screenshot was taken while the phase drew" > "$logs/pictures.txt"
+		return 1
+	fi
+	if [ -z "$baseline" ]; then
+		echo "pictures: $count, their signatures saved in $save_baseline" > "$logs/pictures.txt"
+		return 0
+	fi
+	signature_picture "$best_reference" "$logs/baseline-grid.png" 2> /dev/null &&
+		signature_picture "${best%.png}.sig" "$logs/grid.png" 2> /dev/null &&
+		$convert "$logs/baseline-grid.png" "$logs/grid.png" \( "$best" -resize '640x360!' \) +append "$logs/compare.png" 2> /dev/null || true
+	if awk -v a="$best_difference" -v b="$max_difference" 'BEGIN { exit !(a <= b) }'; then
+		echo "pictures: $count; the closest, $(basename "$best"), is $best_difference from the baseline's $(basename "$best_reference") (at most $max_difference)" > "$logs/pictures.txt"
+		return 0
+	fi
+	echo "the picture is not the baseline's: $best_difference off at best, of $count screenshots (at most $max_difference; compare.png)" > "$logs/pictures.txt"
+	return 1
+}
+
 # a screenshot of the display (a phase's shots folder, the picture's name)
 screenshot() {
 	[ "$shots_every" != 0 ] || return 0
@@ -241,16 +396,22 @@ marked_in() {
 phase() {
 	local name=$1 init=$2 after=$3 mark=$4 hold=$5
 	local logs="$out/$name" started now result=fail reason="" marked=0 drawing=0 logs_found mark_frame=0 first_frame=0 last_frame=0
-	local shot=0 last_shot shader_failures
+	local shot=0 last_shot shader_failures drawn=0
 	mkdir -p "$logs"
 	rm -rf "$game/logs" "$game/z" "$logs/shots"
+	rm -f "$logs/pictures.txt" "$logs/compare.png" "$logs/grid.png" "$logs/baseline-grid.png"
 	rm -f "$game"/failed[0-9][0-9].vert "$game"/failed[0-9][0-9].frag
 	rm -f "$game/port.txt" "$game/init.txt" "$portable/log.txt"
 	if [ -n "$init" ]; then
 		printf '%s\r\n' "$init" > "$game/init.txt"
 	fi
 	echo "$name: starting Cemu"
-	"$binary" --force-interpreter -g "$card/wiiu/apps/halo.wuhb" > "$logs/cemu.out" 2>&1 &
+	# (full screen when the screenshots are compared: the screen is the game's)
+	if [ "$comparing" = 1 ]; then
+		"$binary" --force-interpreter -f -g "$card/wiiu/apps/halo.wuhb" > "$logs/cemu.out" 2>&1 &
+	else
+		"$binary" --force-interpreter -g "$card/wiiu/apps/halo.wuhb" > "$logs/cemu.out" 2>&1 &
+	fi
 	cemu_pid=$!
 	started=$(date +%s)
 	last_shot=$started
@@ -294,7 +455,16 @@ phase() {
 				reason="no frame drawn after \"$mark\" in $timeout s (frame $mark_frame)"
 				break
 			fi
+		elif [ "$comparing" = 1 ] && [ $((now - drawing)) -lt "$hold" ]; then
+			# (from 10 s in: a map fades in from its loading screen)
+			[ $((now - drawing)) -ge 10 ] || continue
+			screenshot "$logs/shots" "$(printf 'drawn-%03d' "$drawn")"
+			drawn=$((drawn + 1))
 		elif [ $((now - drawing)) -ge "$hold" ]; then
+			if [ "$comparing" = 1 ]; then
+				screenshot "$logs/shots" "$(printf 'drawn-%03d' "$drawn")"
+				drawn=$((drawn + 1))
+			fi
 			# (and the game kept drawing, not only stood there)
 			last_frame=$(frame_now)
 			if [ "$last_frame" -gt "$first_frame" ]; then
@@ -324,9 +494,16 @@ phase() {
 		reason="shader failure: $shader_failures shaders did not compile (the first: $(grep -m1 \
 			"gl: a [a-z]* shader did not compile" "$logs/cemu-log.txt" | sed 's/.*gl: /gl: /' | cut -c1-200))"
 	fi
+	if [ "$result" = pass ] && [ "$comparing" = 1 ] && ! compare_pictures "$name" "$logs"; then
+		result=fail
+		reason=$(cat "$logs/pictures.txt")
+	fi
 	if [ "$result" = pass ]; then
 		echo "$name: PASS ($(( $(date +%s) - started )) s; frames $first_frame to $last_frame in the $hold s)" | tee "$logs/result.txt"
 		cat "$logs/frames.txt" | tee -a "$logs/result.txt"
+		if [ -f "$logs/pictures.txt" ]; then
+			sed 's/^/  /' "$logs/pictures.txt" | tee -a "$logs/result.txt"
+		fi
 	else
 		echo "$name: FAIL: $reason" | tee "$logs/result.txt"
 	fi
@@ -335,12 +512,20 @@ phase() {
 
 status=0
 rm -f "$out/summary.txt"
-phase menu "" "" "starting main menu music" 10 || status=1
-head -1 "$out/menu/result.txt" >> "$out/summary.txt"
+# (the menu runs 30 s when its screenshots are compared, for more of its
+# background's movement)
+menu_seconds=10
+[ "$comparing" = 0 ] || menu_seconds=30
+if [ "$only" != map ]; then
+	phase menu "" "" "starting main menu music" "$menu_seconds" || status=1
+	head -1 "$out/menu/result.txt" >> "$out/summary.txt"
+fi
 # (the map: the game's init.txt; it is in once its scripts are read, which
 # follows its tags and its structure bsp)
-phase map "map_name $map" "starting precaching of map '${map##*\\}'" "scenario scripts:" "$seconds" || status=1
-head -1 "$out/map/result.txt" >> "$out/summary.txt"
+if [ "$only" != menu ]; then
+	phase map "map_name $map" "starting precaching of map '${map##*\\}'" "scenario scripts:" "$seconds" || status=1
+	head -1 "$out/map/result.txt" >> "$out/summary.txt"
+fi
 rm -rf "$data"
 if [ "$status" = 0 ]; then
 	echo "cemu smoke: PASS (Cemu only; not a Wii U)"

@@ -104,7 +104,10 @@ Keep that file to yourself. Unlink on the site's profile page.
   own maps linked, never copied. It fails on a halt, a shader that did not
   compile, or no frames drawn, and on Linux takes a screenshot every 15
   seconds (its own Xvfb when there's no display; `--renderer opengl` for
-  Cemu's OpenGL). A pass in Cemu is not a pass on a Wii U.
+  Cemu's OpenGL). With `--baseline DIR` it also compares the screenshots
+  with ones from a build that looked right (`--save-baseline DIR`), so a
+  flat, untextured world or a menu without its logo fails instead of
+  passing. A pass in Cemu is not a pass on a Wii U.
 
 The Wii U is big-endian, like the Xbox 360.
 
