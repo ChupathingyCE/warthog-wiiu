@@ -21,7 +21,6 @@ the host against the game's own xgpu.h.
 Pure C, no Wii U headers, so the host tests build it as it is.
 */
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -36,6 +35,19 @@ static int rest_is_blank(const char *text, const char *end)
 			return 0;
 	}
 	return 1;
+}
+
+/* why it failed, cut to error's size (C89 has no snprintf) */
+static void set_error(char *error, size_t error_size, const char *text)
+{
+	size_t length = strlen(text);
+
+	if (!error_size)
+		return;
+	if (length >= error_size)
+		length = error_size - 1;
+	memcpy(error, text, length);
+	error[length] = '\0';
 }
 
 char *wiiu_shader_finite_passthrough(const char *source, int *rewritten, char *error, size_t error_size)
@@ -69,7 +81,7 @@ char *wiiu_shader_finite_passthrough(const char *source, int *rewritten, char *e
 			{
 				/* (a line at the start that is not its brace: the body ran
 				on into what follows, which is never taken) */
-				snprintf(error, error_size, "nv2a_finite's body has no closing brace at the start of a line");
+				set_error(error, error_size, "nv2a_finite's body has no closing brace at the start of a line");
 				free(text);
 				return NULL;
 			}
@@ -104,13 +116,13 @@ char *wiiu_shader_finite_passthrough(const char *source, int *rewritten, char *e
 	*out = '\0';
 	if (state == 2)
 	{
-		snprintf(error, error_size, "nv2a_finite's body has no closing brace at the start of a line");
+		set_error(error, error_size, "nv2a_finite's body has no closing brace at the start of a line");
 		free(text);
 		return NULL;
 	}
 	if (!*rewritten && strstr(source, "nv2a_finite("))
 	{
-		snprintf(error, error_size,
+		set_error(error, error_size,
 			"the vertex shader uses nv2a_finite, but not as \"" WIIU_NV2A_FINITE_SIGNATURE "\" with \"{\" on the next line");
 		free(text);
 		return NULL;
