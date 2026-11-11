@@ -101,7 +101,10 @@ Keep that file to yourself. Unlink on the site's profile page.
   `sd:/wiiu/apps/halo/`) or for Cemu.
 - `tools/cemu_smoke.sh`: a smoke test in Cemu 2.6 or later. It boots the
   package to the main menu, then into Blood Gulch for 60 seconds, with your
-  own maps linked, never copied. A pass in Cemu is not a pass on a Wii U.
+  own maps linked, never copied. It fails on a halt, a shader that did not
+  compile, or no frames drawn, and on Linux takes a screenshot every 15
+  seconds (its own Xvfb when there's no display; `--renderer opengl` for
+  Cemu's OpenGL). A pass in Cemu is not a pass on a Wii U.
 
 The Wii U is big-endian, like the Xbox 360.
 
