@@ -17,10 +17,9 @@ Play Chupathingy as homebrew on a Wii U with Aroma. Play on the TV with the
 GamePad or a Pro Controller, and join the same online games as PCs and other
 consoles.
 
-**Status: public test builds.** Earlier test builds play the menus,
-multiplayer maps and online games on real consoles. The newest one, on the
-0.9.0 game, has so far run in the Cemu emulator only. The campaign hasn't
-been tested yet.
+**Status: public test builds.** Test builds play the menus, multiplayer
+maps and online games on real consoles. The newest one is on the 0.9.1
+game. The campaign is being tested now.
 
 Get the newest test build from [Releases](https://github.com/ChupathingyCE/warthog-wiiu/releases).
 
@@ -50,7 +49,7 @@ settings stay.
 
 - The menus, and the multiplayer maps offline.
 - **Online Games:** the [C] Warthog servers and community servers. It joins
-  OpenCE's newest servers (network version 41) and older ones.
+  OpenCE's current servers (network version 44) and older ones.
 - **Up to 32 players.** Online Games lists only the servers that fit.
 - **Controllers:** the GamePad and the Pro Controller. A accepts, B goes
   back.
@@ -75,12 +74,11 @@ Keep that file to yourself. Unlink on the site's profile page.
 
 - Online matches ran at about 15 fps (frame pacing) in earlier builds;
   this is being worked on.
-- The campaign has not been tested yet.
+- The campaign is still being tested.
 - No movies: they are skipped.
 - A game that grows past 32 players is left, as a full one is.
 - The picture is slightly inset from the edges of the TV.
-- On some capture cards the TV picture may not fit until you press HOME once;
-  regular TVs are fine.
+- The loading picture's sky may look cream instead of blue.
 
 ## Reporting problems
 
@@ -169,7 +167,28 @@ folder you point it at, onto your own SD card.
 - Games online now: https://stats.chupathingy.org
 - Discord: https://discord.gg/chupathingy
 
-Licensed GPL-3.0; see `LICENSE`.
+## Support
+
+Chupathingy is free and always will be. Support through
+[Ko-fi](https://ko-fi.com/milenko) goes to running the site and the servers. If
+there's a specific developer or port you'd like to support, ask them: they may
+not be part of our community.
+
+## Credits
+
+- The decompilation: [punpckhdq/halo](https://github.com/punpckhdq/halo) and
+  [bnunu/halo-1](https://github.com/bnunu/halo-1), of the Xbox build 2342.
+- The game: [Chupathingy](https://github.com/ChupathingyCE/chupathingyce),
+  and OpenCE and its contributors, up to October 9, 2026.
+- The Wii U port: [Milenko](https://github.com/MrMilenko) and contributors.
+- Libraries: devkitPro's devkitPPC and wut, [CafeGLSL](https://github.com/Exzap/CafeGLSL)
+  (MIT), and the libraries the game uses, with their licenses in the game's
+  `port/third_party`.
+
+## License
+
+Licensed GPL-3.0; see `LICENSE`. The game (the `chupathingyce` submodule) is
+under its own repository's license. No game files are included.
 
 Warthog is an unofficial fan project. It isn't affiliated with or endorsed by
 Nintendo, Microsoft, Xbox Game Studios, Bungie or Halo Studios. Halo is a
