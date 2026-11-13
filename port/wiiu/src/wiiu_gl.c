@@ -612,6 +612,11 @@ static struct
 	struct program *program;
 } again;
 
+/* (the shadow of GX2's state, kept below the draws: forgotten here and
+counted up when a shader or a texture is made or freed) */
+static void shadow_forget(void);
+static unsigned long shader_generation, texture_generation;
+
 static void gx2_own_work_done(void)
 {
 	GX2ContextState *context = wiiu_video_context_state();
@@ -622,6 +627,7 @@ static void gx2_own_work_done(void)
 	gl.bound_color = NULL;
 	gl.bound_depth = NULL;
 	gl.uploaded_program = 0;
+	shadow_forget();
 }
 
 /* ---------- the waits, timed, and the game's thread watched
@@ -678,6 +684,9 @@ static struct
 	vertices they reach */
 	OSTime prepare, vertices, lists, scans;
 	unsigned long draws, linear_target_draws, programs;
+	/* the state, shader, texture and sampler packets written, and those
+	the shadow of GX2's state (shadow_differs) found already there */
+	unsigned long packets, packets_skipped;
 	unsigned long long copied_bytes, list_indices, ring_bytes, uniform_bytes;
 	/* the GPU's clock at the top of each frame's first command and the
 	bottom of its last (GX2SampleTopGPUCycle, GX2SampleBottomGPUCycle), a
@@ -867,12 +876,15 @@ static void stats_period_log(unsigned long frames, OSTime elapsed, OSTime flip, 
 		stats_ms(watch.query_wait, frames), stats_ms(log_wait, frames), stats_ms(stats.gpu, stats.gpu_frames),
 		stats.gpu_frames);
 	wiiu_log("gl: stats: a frame on average: %.0f draws (%.0f into linear render targets), %.0f program changes, "
-		"%.1f KB of uniforms, %.1f KB of vertices copied, %.0f indices made lists, %.1f KB of draw data in the ring",
+		"%.1f KB of uniforms, %.1f KB of vertices copied, %.0f indices made lists, %.1f KB of draw data in the ring, "
+		"%.0f state packets written and %.0f not (GX2 had them)",
 		(double)stats.draws / count, (double)stats.linear_target_draws / count, (double)stats.programs / count,
 		(double)stats.uniform_bytes / 1024.0 / count, (double)stats.copied_bytes / 1024.0 / count,
-		(double)stats.list_indices / count, (double)stats.ring_bytes / 1024.0 / count);
+		(double)stats.list_indices / count, (double)stats.ring_bytes / 1024.0 / count, (double)stats.packets / count,
+		(double)stats.packets_skipped / count);
 	stats.prepare = stats.vertices = stats.lists = stats.scans = 0;
 	stats.draws = stats.linear_target_draws = stats.programs = 0;
+	stats.packets = stats.packets_skipped = 0;
 	stats.copied_bytes = stats.list_indices = stats.ring_bytes = stats.uniform_bytes = 0;
 	stats.gpu = 0;
 	stats.gpu_frames = 0;
@@ -1266,6 +1278,7 @@ static void texture_component_map(struct texture *texture)
 			swizzle_select(texture->swizzle[2]), swizzle_select(texture->swizzle[3]));
 	GX2InitTextureRegs(&texture->gx2);
 	texture->array_view_made = 0;
+	texture_generation++;
 }
 
 /* (re)makes the texture's surface for this size and format; given_texels:
@@ -2255,6 +2268,8 @@ static int shader_compile(struct shader *shader)
 	GX2ShaderMode mode;
 	OSTime start;
 
+	shader_generation++;
+
 	if (shader->compiled)
 		return shader->vertex || shader->pixel;
 	shader->compiled = 1;
@@ -2426,6 +2441,7 @@ static void shader_describe(const struct shader *shader)
 
 static void shader_release(struct shader *shader)
 {
+	shader_generation++;
 	if (shader->vertex)
 		retire(shader->vertex, shader->cached ? _retired_cached_vertex_shader : _retired_vertex_shader);
 	if (shader->pixel)
@@ -2813,6 +2829,76 @@ static GX2TexClampMode clamp_mode(GLint wrap)
 	}
 }
 
+/* ---------- a shadow of what GX2 was last given
+
+A draw set its render state, its shaders and each of its textures and
+samplers whether or not the draw before had set the same: a dozen packets
+written into the command buffer on the game's thread for every draw, and
+two more for every texture (the Xbox 360's GL layer counted 2,800 render
+states a frame at Blood Gulch's spawn before it kept a shadow, warthog-360
+#76). What GX2 was last given is kept here, and a packet that would give it
+the same again is not written. The shadow is forgotten whenever anything
+else writes GX2's state: this layer's own quads (quad_state, quad_draw),
+GX2's own work (gx2_own_work_done: copies and clears, after which the
+context state is set again), and the frame's end (the swap sets the context
+state again). A shader or a texture made or freed counts a generation up,
+so that a freed one and a new one at the same address never look alike. */
+#define SHADOW_UNITS 16
+static struct
+{
+	int valid;
+	/* apply_render_state's packets, by their arguments */
+	uint32_t color_control[2];
+	uint32_t blend_control[6];
+	float blend_constant[4];
+	uint32_t channel_masks;
+	uint32_t depth_stencil[12];
+	uint32_t stencil_mask[6];
+	uint32_t polygon_control[8];
+	float polygon_offset[2];
+	uint32_t scissor[4];
+	float viewport[6];
+	/* the shaders (prepare_draw) */
+	const GX2VertexShader *vertex;
+	const GX2PixelShader *pixel;
+	unsigned long shader_generation;
+	/* the textures and samplers, by the sampler's location */
+	unsigned long texture_generation;
+	struct
+	{
+		int valid;
+		const GX2Texture *texture;
+		GX2Sampler sampler;
+		float border[4];
+		int border_set;
+	} units[SHADOW_UNITS];
+} shadow;
+
+static void shadow_forget(void)
+{
+	int unit;
+
+	shadow.valid = 0;
+	for (unit = 0; unit < SHADOW_UNITS; unit++)
+		shadow.units[unit].valid = 0;
+}
+
+/* what is kept against what the draw wants: 1 when they differ (the draw's
+is kept now, and the packet is to be written), 0 when GX2 has it already */
+static int shadow_differs(void *kept, const void *now, size_t size)
+{
+	if (shadow.valid && memcmp(kept, now, size) == 0)
+	{
+		if (stats.on)
+			stats.packets_skipped++;
+		return 0;
+	}
+	memcpy(kept, now, size);
+	if (stats.on)
+		stats.packets++;
+	return 1;
+}
+
 /* the scissor, inside the target */
 static void apply_scissor(void)
 {
@@ -2831,7 +2917,12 @@ static void apply_scissor(void)
 		width = right > x ? right - x : 0;
 		height = bottom > y ? bottom - y : 0;
 	}
-	GX2SetScissor((uint32_t)x, (uint32_t)y, (uint32_t)width, (uint32_t)height);
+	{
+		uint32_t scissor[4] = { (uint32_t)x, (uint32_t)y, (uint32_t)width, (uint32_t)height };
+
+		if (shadow_differs(shadow.scissor, scissor, sizeof(scissor)))
+			GX2SetScissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+	}
 }
 
 static void apply_render_state(void)
@@ -2845,20 +2936,44 @@ static void apply_render_state(void)
 	GX2CompareFunction stencil_function = compare_function(gl.stencil_func);
 	int cull_front = 0, cull_back = 0;
 	GX2FrontFace front = GX2_FRONT_FACE_CCW;
+	uint32_t color_control[2] = { (uint32_t)(blend ? 1 : 0), (uint32_t)(mask != 0) };
+	uint32_t blend_control[6] = { (uint32_t)blend_factor(gl.blend_source), (uint32_t)blend_factor(gl.blend_destination),
+		(uint32_t)blend_operation(gl.blend_equation), (uint32_t)blend_factor(gl.blend_source_alpha),
+		(uint32_t)blend_factor(gl.blend_destination_alpha), (uint32_t)blend_operation(gl.blend_equation_alpha) };
+	uint32_t channel_masks = (uint32_t)mask;
+	uint32_t depth_stencil[12] = { (uint32_t)depth, (uint32_t)(depth && gl.depth_mask),
+		(uint32_t)compare_function(debug.equal_as_lequal && gl.depth_func == GL_EQUAL ? GL_LEQUAL : gl.depth_func),
+		(uint32_t)stencil, (uint32_t)stencil_function, (uint32_t)stencil_operation(gl.stencil_zpass),
+		(uint32_t)stencil_operation(gl.stencil_zfail), (uint32_t)stencil_operation(gl.stencil_fail),
+		(uint32_t)stencil_function, (uint32_t)stencil_operation(gl.stencil_zpass),
+		(uint32_t)stencil_operation(gl.stencil_zfail), (uint32_t)stencil_operation(gl.stencil_fail) };
+	uint32_t stencil_mask[6] = { (uint32_t)(uint8_t)gl.stencil_mask, (uint32_t)(uint8_t)gl.stencil_write_mask,
+		(uint32_t)(uint8_t)gl.stencil_reference, (uint32_t)(uint8_t)gl.stencil_mask,
+		(uint32_t)(uint8_t)gl.stencil_write_mask, (uint32_t)(uint8_t)gl.stencil_reference };
+	uint32_t polygon_control[8];
+	float polygon_offset[2] = { gl.polygon_offset_units, gl.polygon_offset_factor };
+	float viewport[6] = { (float)gl.viewport[0], (float)gl.viewport[1], (float)gl.viewport[2], (float)gl.viewport[3],
+		gl.depth_near, gl.depth_far };
 
-	GX2SetColorControl(GX2_LOGIC_OP_COPY, blend ? 1 : 0, FALSE, mask != 0);
-	GX2SetBlendControl(GX2_RENDER_TARGET_0, blend_factor(gl.blend_source), blend_factor(gl.blend_destination),
-		blend_operation(gl.blend_equation), TRUE, blend_factor(gl.blend_source_alpha),
-		blend_factor(gl.blend_destination_alpha), blend_operation(gl.blend_equation_alpha));
-	GX2SetBlendConstantColor(gl.blend_color[0], gl.blend_color[1], gl.blend_color[2], gl.blend_color[3]);
-	GX2SetTargetChannelMasks((GX2ChannelMask)mask, 0, 0, 0, 0, 0, 0, 0);
-	GX2SetDepthStencilControl(depth, depth && gl.depth_mask,
-		compare_function(debug.equal_as_lequal && gl.depth_func == GL_EQUAL ? GL_LEQUAL : gl.depth_func), stencil, FALSE,
-		stencil_function, stencil_operation(gl.stencil_zpass), stencil_operation(gl.stencil_zfail),
-		stencil_operation(gl.stencil_fail), stencil_function, stencil_operation(gl.stencil_zpass),
-		stencil_operation(gl.stencil_zfail), stencil_operation(gl.stencil_fail));
-	GX2SetStencilMask((uint8_t)gl.stencil_mask, (uint8_t)gl.stencil_write_mask, (uint8_t)gl.stencil_reference,
-		(uint8_t)gl.stencil_mask, (uint8_t)gl.stencil_write_mask, (uint8_t)gl.stencil_reference);
+	if (shadow_differs(shadow.color_control, color_control, sizeof(color_control)))
+		GX2SetColorControl(GX2_LOGIC_OP_COPY, (uint8_t)color_control[0], FALSE, (BOOL)color_control[1]);
+	if (shadow_differs(shadow.blend_control, blend_control, sizeof(blend_control)))
+		GX2SetBlendControl(GX2_RENDER_TARGET_0, (GX2BlendMode)blend_control[0], (GX2BlendMode)blend_control[1],
+			(GX2BlendCombineMode)blend_control[2], TRUE, (GX2BlendMode)blend_control[3], (GX2BlendMode)blend_control[4],
+			(GX2BlendCombineMode)blend_control[5]);
+	if (shadow_differs(shadow.blend_constant, gl.blend_color, sizeof(shadow.blend_constant)))
+		GX2SetBlendConstantColor(gl.blend_color[0], gl.blend_color[1], gl.blend_color[2], gl.blend_color[3]);
+	if (shadow_differs(&shadow.channel_masks, &channel_masks, sizeof(channel_masks)))
+		GX2SetTargetChannelMasks((GX2ChannelMask)mask, 0, 0, 0, 0, 0, 0, 0);
+	if (shadow_differs(shadow.depth_stencil, depth_stencil, sizeof(depth_stencil)))
+		GX2SetDepthStencilControl((BOOL)depth_stencil[0], (BOOL)depth_stencil[1], (GX2CompareFunction)depth_stencil[2],
+			(BOOL)depth_stencil[3], FALSE, (GX2CompareFunction)depth_stencil[4], (GX2StencilFunction)depth_stencil[5],
+			(GX2StencilFunction)depth_stencil[6], (GX2StencilFunction)depth_stencil[7],
+			(GX2CompareFunction)depth_stencil[8], (GX2StencilFunction)depth_stencil[9],
+			(GX2StencilFunction)depth_stencil[10], (GX2StencilFunction)depth_stencil[11]);
+	if (shadow_differs(shadow.stencil_mask, stencil_mask, sizeof(stencil_mask)))
+		GX2SetStencilMask((uint8_t)stencil_mask[0], (uint8_t)stencil_mask[1], (uint8_t)stencil_mask[2],
+			(uint8_t)stencil_mask[3], (uint8_t)stencil_mask[4], (uint8_t)stencil_mask[5]);
 	/* (the winding GL culls, from the face it calls front, in window
 	coordinates whose rows run down, glClipControl's GL_UPPER_LEFT, as
 	Direct3D's and GX2's do: GX2 is told the other one is the front, and
@@ -2874,18 +2989,25 @@ static void apply_render_state(void)
 	}
 	else if (gl.cull_face && gl.cull_mode == GL_FRONT_AND_BACK && !debug.no_cull)
 		cull_front = cull_back = 1;
-	GX2SetPolygonControl(front, cull_front, cull_back, gl.polygon_mode != GL_FILL,
-		gl.polygon_mode == GL_LINE ? GX2_POLYGON_MODE_LINE : gl.polygon_mode == GL_POINT ? GX2_POLYGON_MODE_POINT :
-		GX2_POLYGON_MODE_TRIANGLE,
-		gl.polygon_mode == GL_LINE ? GX2_POLYGON_MODE_LINE : gl.polygon_mode == GL_POINT ? GX2_POLYGON_MODE_POINT :
-		GX2_POLYGON_MODE_TRIANGLE,
-		gl.polygon_offset_fill, gl.polygon_offset_fill, FALSE);
-	if (gl.polygon_offset_fill)
+	polygon_control[0] = (uint32_t)front;
+	polygon_control[1] = (uint32_t)cull_front;
+	polygon_control[2] = (uint32_t)cull_back;
+	polygon_control[3] = (uint32_t)(gl.polygon_mode != GL_FILL);
+	polygon_control[4] = polygon_control[5] = (uint32_t)(gl.polygon_mode == GL_LINE ? GX2_POLYGON_MODE_LINE :
+		gl.polygon_mode == GL_POINT ? GX2_POLYGON_MODE_POINT : GX2_POLYGON_MODE_TRIANGLE);
+	polygon_control[6] = polygon_control[7] = (uint32_t)gl.polygon_offset_fill;
+	if (shadow_differs(shadow.polygon_control, polygon_control, sizeof(polygon_control)))
+		GX2SetPolygonControl((GX2FrontFace)polygon_control[0], (BOOL)polygon_control[1], (BOOL)polygon_control[2],
+			(BOOL)polygon_control[3], (GX2PolygonMode)polygon_control[4], (GX2PolygonMode)polygon_control[5],
+			(BOOL)polygon_control[6], (BOOL)polygon_control[7], FALSE);
+	/* (the offset's values stay in their registers while the offset is
+	off, so they are only compared while it is on) */
+	if (gl.polygon_offset_fill && shadow_differs(shadow.polygon_offset, polygon_offset, sizeof(polygon_offset)))
 		GX2SetPolygonOffset(gl.polygon_offset_units, gl.polygon_offset_factor, gl.polygon_offset_units,
 			gl.polygon_offset_factor, 0.0f);
 	apply_scissor();
-	GX2SetViewport((float)gl.viewport[0], (float)gl.viewport[1], (float)gl.viewport[2], (float)gl.viewport[3],
-		gl.depth_near, gl.depth_far);
+	if (shadow_differs(shadow.viewport, viewport, sizeof(viewport)))
+		GX2SetViewport(viewport[0], viewport[1], viewport[2], viewport[3], viewport[4], viewport[5]);
 }
 
 /* a GX2 sampler from GL's parameters */
@@ -3032,6 +3154,13 @@ static int prepare_draw(void)
 		draw_refused("no target");
 		return 0;
 	}
+	/* (a texture made or freed since: every unit's is set again) */
+	if (shadow.texture_generation != texture_generation)
+	{
+		for (index = 0; index < SHADOW_UNITS; index++)
+			shadow.units[index].valid = 0;
+		shadow.texture_generation = texture_generation;
+	}
 	for (index = 0; index < program->uniform_count; index++)
 	{
 		struct uniform *uniform = &program->uniforms[index];
@@ -3040,6 +3169,9 @@ static int prepare_draw(void)
 		GX2Sampler made;
 		const struct sampler_parameters *parameters;
 		const GLfloat *border;
+		const GX2Texture *regs;
+		int location = uniform->sampler_location;
+		int fresh;
 
 		if (!uniform->sampler || uniform->sampler_location < 0)
 			continue;
@@ -3075,24 +3207,70 @@ static int prepare_draw(void)
 				texture->array_view.viewNumSlices = 6;
 				GX2InitTextureRegs(&texture->array_view);
 				texture->array_view_made = 1;
+				texture_generation++;
+				shadow.texture_generation = texture_generation;
 			}
-			GX2SetPixelTexture(&texture->array_view, (uint32_t)uniform->sampler_location);
+			regs = &texture->array_view;
 		}
 		else
-			GX2SetPixelTexture(&texture->gx2, (uint32_t)uniform->sampler_location);
+			regs = &texture->gx2;
+		/* (the unit's texture, sampler and border color, each only when
+		not what GX2 has) */
+		fresh = !shadow.valid || location >= SHADOW_UNITS || !shadow.units[location].valid;
+		if (fresh || shadow.units[location].texture != regs)
+		{
+			GX2SetPixelTexture(regs, (uint32_t)location);
+			if (stats.on)
+				stats.packets++;
+		}
+		else if (stats.on)
+			stats.packets_skipped++;
 		texture_used(texture);
-		GX2SetPixelSampler(&made, (uint32_t)uniform->sampler_location);
+		if (fresh || memcmp(&shadow.units[location].sampler, &made, sizeof(made)) != 0)
+		{
+			GX2SetPixelSampler(&made, (uint32_t)location);
+			if (stats.on)
+				stats.packets++;
+		}
+		else if (stats.on)
+			stats.packets_skipped++;
 		if (parameters->wrap_s == GL_CLAMP_TO_BORDER || parameters->wrap_t == GL_CLAMP_TO_BORDER ||
 			parameters->wrap_r == GL_CLAMP_TO_BORDER)
 		{
-			GX2SetPixelSamplerBorderColor((uint32_t)uniform->sampler_location, border[0], border[1], border[2],
-				border[3]);
+			if (fresh || !shadow.units[location].border_set ||
+				memcmp(shadow.units[location].border, border, sizeof(shadow.units[location].border)) != 0)
+			{
+				GX2SetPixelSamplerBorderColor((uint32_t)location, border[0], border[1], border[2], border[3]);
+				if (location < SHADOW_UNITS)
+				{
+					memcpy(shadow.units[location].border, border, sizeof(shadow.units[location].border));
+					shadow.units[location].border_set = 1;
+				}
+			}
+		}
+		if (location < SHADOW_UNITS)
+		{
+			shadow.units[location].texture = regs;
+			shadow.units[location].sampler = made;
+			shadow.units[location].valid = 1;
 		}
 	}
 	apply_render_state();
-	GX2SetShaderMode(GX2_SHADER_MODE_UNIFORM_REGISTER);
-	GX2SetVertexShader(vertex->vertex);
-	GX2SetPixelShader(fragment->pixel);
+	if (!shadow.valid || shadow.shader_generation != shader_generation || shadow.vertex != vertex->vertex ||
+		shadow.pixel != fragment->pixel)
+	{
+		GX2SetShaderMode(GX2_SHADER_MODE_UNIFORM_REGISTER);
+		GX2SetVertexShader(vertex->vertex);
+		GX2SetPixelShader(fragment->pixel);
+		shadow.vertex = vertex->vertex;
+		shadow.pixel = fragment->pixel;
+		shadow.shader_generation = shader_generation;
+		if (stats.on)
+			stats.packets += 3;
+	}
+	else if (stats.on)
+		stats.packets_skipped += 3;
+	shadow.valid = 1;
 	program_upload(program);
 	if (draw_logged())
 		wiiu_log("gl:   program %u, framebuffer %u (%lux%lu, color %d depth %d), viewport %d %d %d %d, depth %d 0x%x %d, "
@@ -3847,13 +4025,15 @@ static void quad_draw(struct shader *pixel, float x0, float y0, float x1, float 
 	GX2SetPixelShader(pixel->pixel);
 	GX2SetAttribBuffer(0, 4 * 4 * sizeof(float), 4 * sizeof(float), corners);
 	GX2DrawEx(GX2_PRIMITIVE_MODE_TRIANGLE_STRIP, 4, 0, 1);
-	/* (the registers are the quad's now) */
+	/* (the registers, the shaders and the textures are the quad's now) */
 	gl.uploaded_program = 0;
+	shadow_forget();
 }
 
 /* the state for a quad: no depth, stencil, blend or culling */
 static void quad_state(unsigned long width, unsigned long height, int channels)
 {
+	shadow_forget();
 	GX2SetColorControl(GX2_LOGIC_OP_COPY, 0, FALSE, TRUE);
 	GX2SetTargetChannelMasks((GX2ChannelMask)channels, 0, 0, 0, 0, 0, 0, 0);
 	GX2SetDepthStencilControl(FALSE, FALSE, GX2_COMPARE_FUNC_ALWAYS, FALSE, FALSE, GX2_COMPARE_FUNC_ALWAYS,
@@ -4081,6 +4261,7 @@ static void APIENTRY wiiu_glDeleteTextures(GLsizei n, const GLuint *names)
 			continue;
 		texture_release(texture);
 		free(texture);
+		texture_generation++;
 		objects[names[index]].type = _object_none;
 		objects[names[index]].data = NULL;
 		for (unit = 0; unit < TEXTURE_UNITS; unit++)
@@ -5427,10 +5608,12 @@ void wiiu_gl_frame_end(void)
 		stats_frame_done(gl.frame_half);
 	retired_free(gl.frame_half);
 	gl.ring_offset = (unsigned long)gl.frame_half * (RING_SIZE / 2);
-	/* (the next frame binds its own) */
+	/* (the next frame binds its own, and sets its state: the swap sets the
+	context state again) */
 	gl.bound_color = NULL;
 	gl.bound_depth = NULL;
 	gl.uploaded_program = 0;
+	shadow_forget();
 	gl.frame++;
 	/* (log_at=N: the first frame after N seconds, once) */
 	if (debug.log_at && OSTicksToMilliseconds(OSGetSystemTime() - gl.start) / 1000 >= (OSTime)debug.log_at)
