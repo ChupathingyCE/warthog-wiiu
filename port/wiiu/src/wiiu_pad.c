@@ -7,13 +7,20 @@ the GamePad (VPAD) in the first port, then the Wii Remotes' channels (KPAD)
 with a Pro Controller or a Classic Controller, in the ports after it, as
 they connect.
 
-The layout follows the Xbox controller's: A, B, X and Y where the Wii U's
-are (Nintendo's A is the Xbox's B's place: the buttons go by place, not by
-letter, so the jump is the bottom button as on the Xbox), ZL and ZR the
-triggers, L and R the black and white buttons (L white, R black, the
-Xbox's left and right of the face buttons), + Start, - Back, the sticks'
-clicks the thumb buttons. The triggers and the face buttons are digital on
-these controllers: fully pressed or not.
+The face buttons go by their labels, not their places: the Wii U's A is
+the Xbox's A, B is B, X is X and Y is Y. So A accepts and B backs out in
+the menus, as the Wii U's own menus do and as the menus' prompts say, and
+the Xbox's jump on A is the Wii U's A (the right button) too. That is what
+SDL2's Wii U port does by default (SDL_gamecontrollerdb.h's Wii U GamePad
+and Pro Controller rows: a:b0 is VPAD_BUTTON_A, with
+SDL_GAMECONTROLLER_USE_BUTTON_LABELS, SDL2's default), and Butter and
+Jelly, on that SDL, accepts with SDL_CONTROLLER_BUTTON_A and backs out
+with B. The profile's button layouts (Settings: the game's own
+button_preset) move the game's actions between the buttons as on the
+Xbox. ZL and ZR are the triggers, L and R the white and black buttons (L
+white, R black, the Xbox's left and right of the face buttons), + Start,
+- Back, the sticks' clicks the thumb buttons. The triggers and the face
+buttons are digital on these controllers: fully pressed or not.
 */
 
 #include <stdio.h>
