@@ -79,6 +79,9 @@ static void video_frame_wait(void);
 static void *command_buffer_pool;
 static GX2TVRenderMode tv_render_mode;
 static GX2DrcRenderMode drc_render_mode;
+/* the TV's scan buffer's size (the render mode's: SDL's tvWidth and
+tvHeight) and the game's picture's (1280x720) */
+static uint32_t tv_width, tv_height;
 static uint32_t draw_width, draw_height;
 static uint32_t tv_scan_buffer_size, drc_scan_buffer_size;
 static void *tv_scan_buffer, *drc_scan_buffer;
@@ -330,14 +333,20 @@ int wiiu_video_initialize(void)
 	case GX2_TV_SCAN_MODE_480I:
 	case GX2_TV_SCAN_MODE_480P:
 		tv_render_mode = GX2_TV_RENDER_MODE_WIDE_480P;
+		tv_width = 854;
+		tv_height = 480;
 		break;
 	case GX2_TV_SCAN_MODE_1080I:
 	case GX2_TV_SCAN_MODE_1080P:
 		tv_render_mode = GX2_TV_RENDER_MODE_WIDE_1080P;
+		tv_width = 1920;
+		tv_height = 1080;
 		break;
 	case GX2_TV_SCAN_MODE_720P:
 	default:
 		tv_render_mode = GX2_TV_RENDER_MODE_WIDE_720P;
+		tv_width = 1280;
+		tv_height = 720;
 		break;
 	}
 	drc_render_mode = GX2GetSystemDRCScanMode();
@@ -372,13 +381,18 @@ int wiiu_video_initialize(void)
 	GX2SetDepthBuffer(&depth_buffer);
 	GX2SetViewport(0.0f, 0.0f, (float)draw_width, (float)draw_height, 0.0f, 1.0f);
 	GX2SetScissor(0, 0, draw_width, draw_height);
-	GX2SetTVScale(draw_width, draw_height);
+	/* (the scale is the scan buffer's whole size, as SDL's WIIU_VideoInit
+	gives it (tvWidth, tvHeight: 1920x1080 on a 1080p TV) and libwhb's
+	GfxInitTvScanBuffer: the picture's own 1280x720 here left a 1080p TV
+	showing the top left 1280x1080 of its 1920x1080 scan buffer, the right
+	third cut off, until the HOME Menu set the scale again) */
+	GX2SetTVScale(tv_width, tv_height);
 	GX2SetDRCScale(VIDEO_DRC_WIDTH, VIDEO_DRC_HEIGHT);
 	/* (60 frames a second, with vsync: libwhb's) */
 	GX2SetSwapInterval(1);
 
-	wiiu_log("video: GX2 started, TV scan mode %d, GamePad mode %d, drawing %ux%u",
-		(int)GX2GetSystemTVScanMode(), (int)drc_render_mode,
+	wiiu_log("video: GX2 started, TV scan mode %d (%ux%u), GamePad mode %d, drawing %ux%u",
+		(int)GX2GetSystemTVScanMode(), (unsigned int)tv_width, (unsigned int)tv_height, (int)drc_render_mode,
 		(unsigned int)draw_width, (unsigned int)draw_height);
 #ifdef HALO_WIIU_CAFEGLSL
 	/* (the game's renderer draws through wiiu_gl.c) */
