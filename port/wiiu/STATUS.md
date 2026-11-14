@@ -3,6 +3,9 @@
 The log of the Wii U port's bring-up, milestone by milestone: what works, what
 does not, and the next step. The newest entry is at the bottom.
 
+This is a history. Its last entry is from October 28, 2026. What the
+current test build does is in the repository's README.
+
 ## Milestone 1: the whole game compiles and links (2026-10-21)
 
 **Works.** `ninja wiiu` compiles the game's sources (port/linux/port.json),
