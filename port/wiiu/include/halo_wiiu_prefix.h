@@ -32,6 +32,20 @@ source/cseries/xbox_address.h; port/wiiu/src/wiiu_memory.c).
 #define HALO_BIG_ENDIAN 1
 #endif
 
+/* The debug decomp's developer tools (the profiler, the AI, render and
+collision debug, the stack walker, the bitmap tools, and the files they
+write such as d:\gamestate.txt) are not in the build unless it is
+configured with --console-debug-tools (HALO_CONSOLE_DEBUG_TOOLS), as on
+the original Xbox (warthog-xbox's halo_xbox_features.h) and the Xbox 360
+(warthog-360's halo_xbox360_prefix.h). Their modules keep their code under
+#ifndef HALO_CONSOLE_NO_DEBUG_TOOLS and answer their calls with stubs;
+console_debug_tools_unavailable (game/wiiu_debug_tools.c) says so for the
+console commands and scripts that reach them. */
+#ifndef HALO_CONSOLE_DEBUG_TOOLS
+#define HALO_CONSOLE_NO_DEBUG_TOOLS
+void console_debug_tools_unavailable(char const *name);
+#endif
+
 /* ---------- the C library, read first
 
 newlib's headers use __inline for helpers of their own, which the MSVC

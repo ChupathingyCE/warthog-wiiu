@@ -73,9 +73,15 @@ dedicated server does. The log's text screens (wiiu_screen.c) are let go when GX
 static int video_state; /* 0 not started, 1 up, -1 failed or shut down */
 static int video_foreground;
 static int video_screens_enabled;
+/* console.frame_overlap (wiiu_video_set_overlap) */
+static int video_overlap;
+static void video_frame_wait(void);
 static void *command_buffer_pool;
 static GX2TVRenderMode tv_render_mode;
 static GX2DrcRenderMode drc_render_mode;
+/* the TV's scan buffer's size (the render mode's: SDL's tvWidth and
+tvHeight) and the game's picture's (1280x720) */
+static uint32_t tv_width, tv_height;
 static uint32_t draw_width, draw_height;
 static uint32_t tv_scan_buffer_size, drc_scan_buffer_size;
 static void *tv_scan_buffer, *drc_scan_buffer;
@@ -228,6 +234,11 @@ static uint32_t video_release(void *context)
 	(void)context;
 	if (video_state != 1 || !video_foreground)
 		return 0;
+	/* (console.frame_overlap leaves the last swap's flip to come: it is
+	waited for, as every frame's is without it, before its scan buffers
+	are let go) */
+	if (video_overlap)
+		video_frame_wait();
 	GX2DrawDone();
 	heap_free(heap_foreground, tv_scan_buffer);
 	heap_free(heap_foreground, drc_scan_buffer);
@@ -322,14 +333,20 @@ int wiiu_video_initialize(void)
 	case GX2_TV_SCAN_MODE_480I:
 	case GX2_TV_SCAN_MODE_480P:
 		tv_render_mode = GX2_TV_RENDER_MODE_WIDE_480P;
+		tv_width = 854;
+		tv_height = 480;
 		break;
 	case GX2_TV_SCAN_MODE_1080I:
 	case GX2_TV_SCAN_MODE_1080P:
 		tv_render_mode = GX2_TV_RENDER_MODE_WIDE_1080P;
+		tv_width = 1920;
+		tv_height = 1080;
 		break;
 	case GX2_TV_SCAN_MODE_720P:
 	default:
 		tv_render_mode = GX2_TV_RENDER_MODE_WIDE_720P;
+		tv_width = 1280;
+		tv_height = 720;
 		break;
 	}
 	drc_render_mode = GX2GetSystemDRCScanMode();
@@ -364,13 +381,18 @@ int wiiu_video_initialize(void)
 	GX2SetDepthBuffer(&depth_buffer);
 	GX2SetViewport(0.0f, 0.0f, (float)draw_width, (float)draw_height, 0.0f, 1.0f);
 	GX2SetScissor(0, 0, draw_width, draw_height);
-	GX2SetTVScale(draw_width, draw_height);
+	/* (the scale is the scan buffer's whole size, as SDL's WIIU_VideoInit
+	gives it (tvWidth, tvHeight: 1920x1080 on a 1080p TV) and libwhb's
+	GfxInitTvScanBuffer: the picture's own 1280x720 here left a 1080p TV
+	showing the top left 1280x1080 of its 1920x1080 scan buffer, the right
+	third cut off, until the HOME Menu set the scale again) */
+	GX2SetTVScale(tv_width, tv_height);
 	GX2SetDRCScale(VIDEO_DRC_WIDTH, VIDEO_DRC_HEIGHT);
 	/* (60 frames a second, with vsync: libwhb's) */
 	GX2SetSwapInterval(1);
 
-	wiiu_log("video: GX2 started, TV scan mode %d, GamePad mode %d, drawing %ux%u",
-		(int)GX2GetSystemTVScanMode(), (int)drc_render_mode,
+	wiiu_log("video: GX2 started, TV scan mode %d (%ux%u), GamePad mode %d, drawing %ux%u",
+		(int)GX2GetSystemTVScanMode(), (unsigned int)tv_width, (unsigned int)tv_height, (int)drc_render_mode,
 		(unsigned int)draw_width, (unsigned int)draw_height);
 #ifdef HALO_WIIU_CAFEGLSL
 	/* (the game's renderer draws through wiiu_gl.c) */
@@ -460,6 +482,17 @@ void wiiu_video_swap(void)
 {
 	if (video_state != 1 || !video_foreground)
 		return;
+	/* (console.frame_overlap: the frame before's flip waited for here,
+	before this one's copy, so that one swap at most is ever queued and the
+	next frame's own work runs while the GPU draws this one and its flip
+	comes. SDL's Wii U renderer (WIIU_SDL_RenderPresent, WIIU_FrameDone in
+	devkitPro/SDL wiiu-sdl2-2.28) never waits for a flip: it waits only
+	for the frame before last on the GPU, as wiiu_gl_frame_end does here.
+	This waits for that and for the frame before's flip, before this
+	frame's commands touch the scan buffers, as libwhb's
+	WHBGfxBeginRender does.) */
+	if (video_overlap)
+		video_frame_wait();
 	wiiu_gl_step("the copy to the screens");
 	GX2CopyColorBufferToScanBuffer(&color_buffer, GX2_SCAN_TARGET_TV);
 	GX2CopyColorBufferToScanBuffer(&color_buffer, GX2_SCAN_TARGET_DRC);
@@ -476,7 +509,18 @@ void wiiu_video_swap(void)
 		video_screens_enabled = 1;
 		wiiu_log("video: the first frame shown");
 	}
-	video_frame_wait();
+	if (!video_overlap)
+		video_frame_wait();
+}
+
+void wiiu_video_set_overlap(int overlap)
+{
+	overlap = overlap != 0;
+	if (overlap != video_overlap)
+		wiiu_log("video: %s", overlap ?
+			"the next frame starts while this one is drawn (console.frame_overlap)" :
+			"each frame waits to be shown before the next starts");
+	video_overlap = overlap;
 }
 
 /* (every frame, from the system's events, while the game draws nothing:
