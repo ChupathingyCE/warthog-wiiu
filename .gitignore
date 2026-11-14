@@ -2,3 +2,10 @@ build/
 build.ninja
 .ninja_*
 __pycache__
+
+# What the build and tools/wiiu_package.py make, and your own maps
+# (never commit)
+*.rpx
+*.wuhb
+*.map
+/package/
