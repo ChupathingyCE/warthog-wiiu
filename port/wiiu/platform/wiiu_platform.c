@@ -34,6 +34,22 @@ BOOL platform_sdl_initialize(void)
 	return TRUE;
 }
 
+/* a path as the player finds it: wut mounts the SD card at
+fs:/vol/external01, which the missing maps screen shows as sd:/
+(the game's source/interface/missing_maps_screen.c) */
+void console_path_shown(const char *path, char *shown, unsigned long size)
+{
+	static const char card[] = "fs:/vol/external01";
+	size_t length = sizeof(card) - 1;
+
+	if (!size)
+		return;
+	if (!strncmp(path, card, length) && (path[length] == '/' || !path[length]))
+		snprintf(shown, size, "sd:/%s", path[length] ? path + length + 1 : "");
+	else
+		snprintf(shown, size, "%s", path);
+}
+
 /* (no disc image to offer: the player's maps are on the SD card) */
 BOOL platform_offer_game_data(char *destination, unsigned long size)
 {
