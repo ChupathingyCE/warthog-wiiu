@@ -2,8 +2,7 @@
 WIIU_CRASH.C
 
 A crash's report: where a thread took a CPU exception (a bad address read
-or written, an instruction fetched from one, a misaligned access, an
-illegal instruction), in port.txt and crash.txt and on the screen, instead
+or written, an instruction fetched from one, an illegal instruction), in port.txt and crash.txt and on the screen, instead
 of the system's bare "An error has occurred" screen.
 
 The callbacks are coreinit's, for every core (OSSetExceptionCallbackEx with
@@ -160,7 +159,6 @@ static BOOL crash_callback(int type, OSContext *context)
 
 static BOOL crash_dsi(OSContext *context) { return crash_callback(OS_EXCEPTION_TYPE_DSI, context); }
 static BOOL crash_isi(OSContext *context) { return crash_callback(OS_EXCEPTION_TYPE_ISI, context); }
-static BOOL crash_alignment(OSContext *context) { return crash_callback(OS_EXCEPTION_TYPE_ALIGNMENT, context); }
 static BOOL crash_program(OSContext *context) { return crash_callback(OS_EXCEPTION_TYPE_PROGRAM, context); }
 
 /* (before the game's start, after the log's) */
@@ -168,7 +166,9 @@ __attribute__((constructor(103))) static void crash_attach(void)
 {
 	OSSetExceptionCallbackEx(OS_EXCEPTION_MODE_GLOBAL_ALL_CORES, OS_EXCEPTION_TYPE_DSI, crash_dsi);
 	OSSetExceptionCallbackEx(OS_EXCEPTION_MODE_GLOBAL_ALL_CORES, OS_EXCEPTION_TYPE_ISI, crash_isi);
-	OSSetExceptionCallbackEx(OS_EXCEPTION_MODE_GLOBAL_ALL_CORES, OS_EXCEPTION_TYPE_ALIGNMENT, crash_alignment);
+	/* (not the alignment exception: the system's own handling of a
+	misaligned access goes on as before, and a report of one that would
+	have been handled ends a game that would have run) */
 	OSSetExceptionCallbackEx(OS_EXCEPTION_MODE_GLOBAL_ALL_CORES, OS_EXCEPTION_TYPE_PROGRAM, crash_program);
-	wiiu_log("crash: exception reports on (DSI, ISI, alignment, program; all cores)");
+	wiiu_log("crash: exception reports on (DSI, ISI, program; all cores)");
 }
