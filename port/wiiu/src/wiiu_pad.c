@@ -238,8 +238,41 @@ static unsigned int test_hold(void)
 	return OSTicksToMilliseconds(now - test_step_time) < TEST_STEP_MS / 2 ? test_button(test_buttons[test_index]) : 0;
 }
 
+static uint8_t channel_extensions[4] = { 0xff, 0xff, 0xff, 0xff };
+
+/* the game's (players.c): 0 before its players are made */
+short players_port_local_player_count(void);
+
+/* (once a frame) what each input channel reports and how many local
+players the game has, a line each time any of it changes: the GamePad
+(VPAD 0) and the four Wii Remote channels (KPAD), with the extension each
+reads as */
+static void pads_log_channels(VPADReadError gamepad_error, const KPADError errors[4], const uint8_t extensions[4])
+{
+	static char last[160];
+	char line[160];
+	int channel, used;
+
+	used = snprintf(line, sizeof(line), "VPAD 0 %s;", gamepad_error == VPAD_READ_SUCCESS ||
+		gamepad_error == VPAD_READ_NO_SAMPLES ? "connected" : gamepad_error == VPAD_READ_INVALID_CONTROLLER ?
+		"none" : "error");
+	for (channel = 0; channel < 4 && used < (int)sizeof(line); channel++)
+		used += snprintf(line + used, sizeof(line) - used, " KPAD %d %s ext %u (port %d);", channel,
+			errors[channel] == KPAD_ERROR_INVALID_CONTROLLER ? "none" : errors[channel] == KPAD_ERROR_OK ? "ok" :
+			"other", (unsigned int)extensions[channel], channel_ports[channel] + 1);
+	if (used < (int)sizeof(line))
+		snprintf(line + used, sizeof(line) - used, " local players %d", (int)players_port_local_player_count());
+	if (strcmp(line, last))
+	{
+		strcpy(last, line);
+		wiiu_log("input: %s", line);
+	}
+}
+
 void wiiu_pad_update(void)
 {
+	KPADError kpad_errors[4] = { 0 };
+	uint8_t kpad_extensions[4] = { 0 };
 	VPADStatus gamepad;
 	VPADReadError gamepad_error = VPAD_READ_SUCCESS;
 	unsigned int extra;
@@ -272,6 +305,13 @@ void wiiu_pad_update(void)
 
 		memset(&status, 0, sizeof(status));
 		count = KPADReadEx((KPADChan)channel, &status, 1, &error);
+		/* (the last extension seen stands while no new samples come) */
+		kpad_errors[channel] = error == KPAD_ERROR_NO_SAMPLES ? KPAD_ERROR_OK : error;
+		if (count > 0)
+			channel_extensions[channel] = status.extensionType;
+		else if (error == KPAD_ERROR_INVALID_CONTROLLER)
+			channel_extensions[channel] = 0xff;
+		kpad_extensions[channel] = channel_extensions[channel];
 		if (error == KPAD_ERROR_INVALID_CONTROLLER)
 		{
 			if (port >= 0)
@@ -310,6 +350,7 @@ void wiiu_pad_update(void)
 				status.classic.leftStick.y, status.classic.rightStick.x, status.classic.rightStick.y);
 		}
 	}
+	pads_log_channels(gamepad_error, kpad_errors, kpad_extensions);
 }
 
 int wiiu_pad_read(int port, struct wiiu_pad_state *state)
