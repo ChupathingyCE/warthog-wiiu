@@ -34,7 +34,10 @@ int clock_nanosleep(clockid_t clock, int flags, const struct timespec *request, 
 		nanoseconds -= (long long)now.tv_sec * 1000000000LL + now.tv_nsec;
 	}
 	if (nanoseconds > 0)
+	{
+		wiiu_main_crumb("the frame pacing");
 		wiiu_proc_poll();
+	}
 	if (nanoseconds > 0)
 		OSSleepTicks(OSNanosecondsToTicks(nanoseconds));
 	return 0;
@@ -46,6 +49,7 @@ that runs the game serve the system, so HOME works while they last */
 
 void console_wait_poll(void)
 {
+	wiiu_main_crumb("a wait");
 	wiiu_proc_poll();
 }
 
@@ -149,6 +153,7 @@ ssize_t pread(int descriptor, void *buffer, size_t count, off_t offset)
 	off_t previous;
 	ssize_t result = -1;
 
+	wiiu_main_crumb("a file read");
 	wiiu_proc_poll();
 	positional_lock();
 	previous = lseek(descriptor, 0, SEEK_CUR);

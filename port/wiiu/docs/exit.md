@@ -191,3 +191,15 @@ still open at the system's exit that none of the references leave:
 
 To be tested on the console: HOME, then Close, then start the game again
 (the screen must not be dark); and HOME, then back to the game.
+
+## The game's own thread (2026-11-20)
+
+The game runs on a thread of its own with an 8 MB stack
+(`src/wiiu_main.c`); the main thread's 64 KB was too little for the
+campaign (#34). The main thread keeps ProcUI and takes its messages when
+the game's thread asks, at the same points as before. `exit()` is wrapped
+(`--wrap=exit`): called on the game's thread, it runs on the main thread,
+so the atexit handlers, `proc_end` and wut's end run there as they did
+before. The game's thread waits on its reply until the process ends, as
+the cache file thread waits on its event: it never runs again, and its
+stack (from the heap) is given back with the rest by `__fini_wut`.
