@@ -70,6 +70,7 @@ the first time.
 #include <string.h>
 
 #include <coreinit/cache.h>
+#include <coreinit/core.h>
 #include <coreinit/memorymap.h>
 #include <coreinit/thread.h>
 #include <coreinit/time.h>
@@ -961,13 +962,58 @@ while the log's writer thread takes the lines, wiiu_log.c) */
 	watch.period_start = now;
 }
 
+/* (watch_main's) where the game's thread is: its state, and the registers
+it was last switched out with (srr0, where it was; lr, the function it was
+called from; r1, its stack pointer), read once it has stopped for a moment
+if it was running, as it is with OSSuspendThread (nothing is logged while it
+is stopped: it may hold the log's lock) */
+static void watch_stall_log(OSTime since)
+{
+	OSThread *game = wiiu_main_game_thread();
+	uint32_t srr0 = 0, lr = 0, r1 = 0, top = 0;
+	const char *how = "on the main thread (not read)";
+	int tries;
+
+	if (game)
+	{
+		top = (uint32_t)game->stackStart;
+		if (game->state & (OS_THREAD_STATE_RUNNING | OS_THREAD_STATE_READY))
+		{
+			OSSuspendThread(game);
+			for (tries = 0; tries < 20 && (game->state & OS_THREAD_STATE_RUNNING); tries++)
+				OSSleepTicks(OSMillisecondsToTicks(1));
+			how = game->state & OS_THREAD_STATE_RUNNING ? "running (not stopped in 20 ms: its last switch's registers)" : "running";
+			srr0 = game->context.srr0;
+			lr = game->context.lr;
+			r1 = game->context.gpr[1];
+			OSResumeThread(game);
+		}
+		else
+		{
+			how = game->state & OS_THREAD_STATE_WAITING ? "waiting" : "stopped";
+			srr0 = game->context.srr0;
+			lr = game->context.lr;
+			r1 = game->context.gpr[1];
+		}
+	}
+	wiiu_log("gl: watch: no frame for %lu s (frame %lu, the last step %s): the game's thread %s at srr0 %08lx lr %08lx, "
+		"r1 %08lx (%lu KB into its stack)", (unsigned long)(OSTicksToMilliseconds(since) / 1000), gl.frame,
+		watch.step ? watch.step : "none", how, (unsigned long)srr0, (unsigned long)lr, (unsigned long)r1,
+		(unsigned long)(top > r1 && r1 ? (top - r1) / 1024 : 0));
+}
+
 /* the watch thread: where the game's thread has stayed for more than 3 s,
 while the game has the foreground (the HOME button menu's wait is not
-logged), once, then every 10 s */
+logged), once, then every 10 s; a stretch of more than 3 s without a frame,
+drawn or not (a map's load, or a hang before its first frame), with where
+the game's thread is, once, then every 10 s; and the game's stack's depth
+(wiiu_main.c) */
 static int watch_main(int argc, const char **argv)
 {
 	const char *logged = NULL;
 	OSTime logged_at = 0;
+	unsigned long last_frame = gl.frame;
+	OSTime frame_seen = OSGetSystemTime(), stall_logged = 0;
 
 	(void)argc;
 	(void)argv;
@@ -977,9 +1023,22 @@ static int watch_main(int argc, const char **argv)
 		OSTime since, now;
 
 		OSSleepTicks(OSMillisecondsToTicks(500));
+		now = OSGetSystemTime();
+		wiiu_main_stack_watch();
+		if (gl.frame != last_frame || wiiu_proc_waiting())
+		{
+			last_frame = gl.frame;
+			frame_seen = now;
+			stall_logged = 0;
+		}
+		else if (now - frame_seen >= OSSecondsToTicks(3) &&
+			(!stall_logged || now - stall_logged >= OSSecondsToTicks(10)))
+		{
+			watch_stall_log(now - frame_seen);
+			stall_logged = now;
+		}
 		step = watch.step;
 		since = watch.step_time;
-		now = OSGetSystemTime();
 		if (!step || !wiiu_video_drawing() || now - since < OSSecondsToTicks(3))
 			continue;
 		if (step == logged && now - logged_at < OSSecondsToTicks(10))
@@ -1009,9 +1068,14 @@ static void watch_start(void)
 		return;
 	watch.thread = memalign(16, sizeof(OSThread));
 	watch.stack = memalign(16, stack_size);
+	/* (on the cores the game's thread is not on, above its priority: a
+	game's thread that never waits, in a load or a hang, would otherwise keep
+	it from running where it shares a core, as in Cemu's interpreter; it
+	sleeps but for a moment every half second) */
 	if (!watch.thread || !watch.stack ||
-		!OSCreateThread(watch.thread, WIIU_THREAD_ENTRY(watch_main), 0, NULL, (unsigned char *)watch.stack + stack_size, stack_size, 17,
-		OS_THREAD_ATTRIB_AFFINITY_ANY))
+		!OSCreateThread(watch.thread, WIIU_THREAD_ENTRY(watch_main), 0, NULL, (unsigned char *)watch.stack + stack_size, stack_size,
+		OSGetThreadPriority(OSGetCurrentThread()) - 1,
+		(OSThreadAttributes)(OS_THREAD_ATTRIB_AFFINITY_ANY & ~(1u << OSGetCoreId()))))
 	{
 		free(watch.thread);
 		free(watch.stack);
