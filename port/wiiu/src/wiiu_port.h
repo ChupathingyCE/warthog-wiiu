@@ -121,6 +121,14 @@ void wiiu_pad_update(void);
 int wiiu_pad_read(int port, struct wiiu_pad_state *state);
 void wiiu_pad_rumble(int port, int on);
 
+/* the floating-point unit in IEEE mode, denormals kept as on a PC
+(wiiu_float.c): the FPSCR, NI cleared on this thread, and a line in the log
+with this thread's mode */
+unsigned int wiiu_float_mode(void);
+void wiiu_float_ieee(void);
+void wiiu_float_initialize(void);
+void wiiu_float_report(const char *thread);
+
 /* A thread's entry for OSCreateThread, cast to wut's OSThreadEntryPointFn as
 SDL2's Wii U port does (devkitPro/SDL wiiu-sdl2-2.28,
 src/thread/wiiu/SDL_systhread.c and src/audio/wiiu/SDL_wiiuaudio.c). wut

@@ -539,7 +539,10 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
                         f"-Wl,-Map,{_quote(build_dir / 'halo.map')}",
                         # one copy of each inline function every unit emits
                         # (MSVC's COMDATs: halo_wiiu_prefix.h)
-                        "-Wl,--allow-multiple-definition"])
+                        "-Wl,--allow-multiple-definition",
+                        # every thread created in IEEE mode, denormals
+                        # kept as on a PC (src/wiiu_float.c)
+                        "-Wl,--wrap=OSCreateThread"])
     n.build(
         outputs=elf,
         rule="wiiu_elf",

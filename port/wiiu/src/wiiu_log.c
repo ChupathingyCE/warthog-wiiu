@@ -199,6 +199,9 @@ static int writer_main(int argc, const char **argv)
 
 	(void)argc;
 	(void)argv;
+	/* (the first thread created after the start: its mode shows the
+	OSCreateThread wrap at work) */
+	wiiu_float_report("the log's writer thread");
 	OSLockMutex(&log_mutex);
 	while (!writer_stop)
 	{

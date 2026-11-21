@@ -145,6 +145,8 @@ static void proc_initialize(void)
 	proc_ready = 1;
 	atexit(proc_end);
 	wiiu_log("system: ProcUI ready");
+	/* (the mode the constructor left on this thread, the game's) */
+	wiiu_float_report("the game's thread");
 	wiiu_log_start_writer();
 	/* (the network's self-test and the console game list, on a thread of
 	their own: wiiu_online.c) */
