@@ -117,15 +117,32 @@ Main menu:
 
 Blood Gulch:
 
-1. The level loads (the first run compiles the level's shaders, about 50
-   the menu did not need: expect hitches for the first minute; a second run
-   reads them from `shaders/`).
+1. The level loads. The first run compiles the level's shaders while the
+   loading screen is up (`shaders: bloodgulch: making 90 keys ... at the
+   loading screen` in port.txt, then how many were made). The screen can
+   stay up to 15 s longer than before. Whatever isn't done by then is
+   compiled at its first draw and shows as hitches in the first minute.
+   A second run reads them all from `shaders/`.
 2. The terrain, sky, bases and the HUD drawn; colors as on the desktop.
 3. Walk and look around (GamePad or Pro Controller): the frame rate, any
    blinking, any part of the picture missing.
 4. The sound.
 
 Send back `port.txt` (and `logs/debug.txt` if the game stopped).
+
+## The shader cache
+
+`sd:/wiiu/apps/halo/shaders/` holds every shader CafeGLSL has compiled,
+one file each (`.vsh`, `.psh`). A file is named by a hash of the shader's
+text and the compiler's version, nothing about the console, so a folder
+filled by one copy of a build should work for any other copy of the same
+build, including one filled in Cemu. This has been checked from one Cemu
+run to the next, but not yet from Cemu to a Wii U: if you try it, say so
+with your port.txt (`gl: N shaders ready (M from the SD card's cache ...)`).
+To skip the first run's compiles, copy the folder from a Cemu run of the
+same build (Cemu's `sdcard/wiiu/apps/halo/shaders/`) to the card. A different build, or `gl.txt` switches that change
+the shaders' text, give other names: the old files are not used (delete the
+folder to free the space), and the shaders are compiled again.
 
 ## What the log says
 
