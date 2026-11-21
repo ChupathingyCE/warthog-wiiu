@@ -46,6 +46,13 @@ console commands and scripts that reach them. */
 void console_debug_tools_unavailable(char const *name);
 #endif
 
+/* A map's shaders compiled while its loading screen is up, from its shader
+key list (the game's d3d8_shader_prep.inl, display.prepare_shaders), so a
+draw in play does not stop the game for CafeGLSL. */
+#ifndef HALO_CONSOLE_SHADER_PREP
+#define HALO_CONSOLE_SHADER_PREP 1
+#endif
+
 /* ---------- the C library, read first
 
 newlib's headers use __inline for helpers of their own, which the MSVC
