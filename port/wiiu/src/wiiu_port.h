@@ -81,6 +81,22 @@ void wiiu_exit_threads(const char *when);
 int wiiu_proc_update(void);
 void wiiu_proc_request_quit(void);
 void wiiu_proc_poll(void);
+/* the game's thread waits on ProcUI (the HOME button menu, or its messages
+being taken) */
+int wiiu_proc_waiting(void);
+
+/* the game's own thread, with a stack it can use (wiiu_main.c): function
+run on the main thread for it, and the stack's depth logged (the watch
+thread's) */
+int wiiu_main_call(int (*function)(int), int argument);
+struct OSThread *wiiu_main_game_thread(void);
+struct OSThread *wiiu_main_watched_thread(void);
+void wiiu_main_stack_watch(void);
+void wiiu_main_crumb(const char *step);
+int wiiu_main_crumb_read(const char **step, unsigned long *age_ms, unsigned long *depth, unsigned long *deepest,
+	const char **deepest_step, unsigned long *stack_size);
+/* the watch thread stopped (the end's first step: wiiu_proc.c) */
+void wiiu_gl_watch_stop(void);
 
 /* the network (wiiu_net.c): up as Butter and Jelly brings it up, once;
 nonzero if it is */

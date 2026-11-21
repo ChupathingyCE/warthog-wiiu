@@ -542,7 +542,11 @@ def generate(n: Writer, sln: Any, port: ConsolePort) -> None:
                         "-Wl,--allow-multiple-definition",
                         # every thread created in IEEE mode, denormals
                         # kept as on a PC (src/wiiu_float.c)
-                        "-Wl,--wrap=OSCreateThread"])
+                        "-Wl,--wrap=OSCreateThread",
+                        # the game on a thread of its own, with a stack it
+                        # can use, and its end on the main thread
+                        # (src/wiiu_main.c), and a breadcrumb at each read
+                        "-Wl,--wrap=main,--wrap=exit,--wrap=read"])
     n.build(
         outputs=elf,
         rule="wiiu_elf",

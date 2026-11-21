@@ -46,6 +46,8 @@ static void proc_end(void)
 {
 	wiiu_exit_begin();
 	wiiu_exit_phase("proc_end: begun");
+	/* (the watch first: it logs while no frame comes, as in the end) */
+	wiiu_gl_watch_stop();
 	wiiu_log("system: the game ended");
 	/* (every line from here written as it comes, the writer thread
 	stopped first: docs/exit.md) */
@@ -130,7 +132,9 @@ static void proc_initialize(void)
 	if (proc_ready)
 		return;
 	ProcUIInit(&OSSavesDone_ReadyToRelease);
-	/* (ProcUI is driven from this thread alone: its messages are taken here) */
+	/* (ProcUI is driven from this thread alone, the main thread: its
+	messages are taken here, for the game's thread when it asks:
+	wiiu_main.c) */
 	proc_thread = OSGetCurrentThread();
 	ProcUIRegisterCallback(PROCUI_CALLBACK_RELEASE, proc_release, NULL, 100);
 	ProcUIRegisterCallback(PROCUI_CALLBACK_ACQUIRE, proc_acquire, NULL, 100);
@@ -193,6 +197,19 @@ static int proc_service(void)
 	}
 }
 
+static int proc_service_call(int unused)
+{
+	(void)unused;
+	return proc_service();
+}
+
+/* (the watch thread's, wiiu_gl.c) the game's thread waits on ProcUI: the
+HOME button menu has the foreground, or the messages are being taken */
+int wiiu_proc_waiting(void)
+{
+	return proc_in_service;
+}
+
 int wiiu_proc_update(void)
 {
 	int status;
@@ -201,33 +218,19 @@ int wiiu_proc_update(void)
 	if (quit_requested)
 		return 0;
 	wiiu_screen_update();
+	wiiu_main_crumb("the frame's system messages");
 	proc_last_service = OSGetSystemTime();
 	proc_in_service = 1;
-	status = proc_service();
+	/* (on the main thread, which owns ProcUI: wiiu_main.c) */
+	status = wiiu_main_call(proc_service_call, 0);
 	proc_in_service = 0;
 	return status;
 }
 
-/* The loading of the maps goes seconds without a frame, and ProcUI
-(taken once a frame above) would hear nothing from the HOME button in that
-time. The places a long stretch passes through often (the files' reads,
-the frame pacing) call this, but not the log, which the constructors use
-before the game starts: it takes the messages, no more often than
-every 16 ms, and only on the thread that started ProcUI (ProcUIProcessMessages
-is that thread's; ProcUISubProcessMessages is for threads of another core,
-and a callback would run on a thread that cannot release the foreground for
-the game). */
-void wiiu_proc_poll(void)
+/* (wiiu_proc_poll's, on the main thread) the messages taken once */
+static int proc_poll_messages(int unused)
 {
-	OSTime now;
-
-	if (!proc_ready || proc_in_service || proc_exiting || OSGetCurrentThread() != proc_thread)
-		return;
-	now = OSGetSystemTime();
-	if (now - proc_last_service < OSMillisecondsToTicks(16))
-		return;
-	proc_last_service = now;
-	proc_in_service = 1;
+	(void)unused;
 	/* (TRUE, as the system's own samples ask: it returns at once while the
 	game is in the foreground, and the first call with FALSE never returned
 	on the console; the release and the wait in the background are the
@@ -269,6 +272,33 @@ void wiiu_proc_poll(void)
 		proc_exiting = 1;
 		exit(EXIT_SUCCESS);
 	}
+	return 0;
+}
+
+/* The loading of the maps goes seconds without a frame, and ProcUI
+(taken once a frame above) would hear nothing from the HOME button in that
+time. The places a long stretch passes through often (the files' reads,
+the frame pacing) call this, but not the log, which the constructors use
+before the game starts: it takes the messages, no more often than
+every 16 ms, and only for the game's thread (the other threads' calls are
+let go), on the main thread, the one that started ProcUI
+(ProcUIProcessMessages is that thread's; ProcUISubProcessMessages is for
+threads of another core, and a callback would run on a thread that cannot
+release the foreground for the game). The game's thread waits meanwhile,
+as it did when the game ran on the main thread. */
+void wiiu_proc_poll(void)
+{
+	OSThread *game = wiiu_main_game_thread();
+	OSTime now;
+
+	if (!proc_ready || proc_in_service || proc_exiting || OSGetCurrentThread() != (game ? game : proc_thread))
+		return;
+	now = OSGetSystemTime();
+	if (now - proc_last_service < OSMillisecondsToTicks(16))
+		return;
+	proc_last_service = now;
+	proc_in_service = 1;
+	wiiu_main_call(proc_poll_messages, 0);
 	proc_in_service = 0;
 }
 
