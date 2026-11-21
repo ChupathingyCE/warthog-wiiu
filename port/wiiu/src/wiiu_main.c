@@ -129,6 +129,8 @@ static int game_main(int argc, const char **argv)
 {
 	(void)argc;
 	(void)argv;
+	/* (the mode it was created with: OSCreateThread's wrap, wiiu_float.c) */
+	wiiu_float_report("the game's thread");
 	exit(__real_main(game_argc, game_argv));
 	return 0;
 }
