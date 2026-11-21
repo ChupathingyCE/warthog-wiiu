@@ -64,6 +64,13 @@ static OSMessageQueue requests, replies;
 static OSMessage request_messages[1], reply_messages[1];
 static unsigned long stack_logged;
 static OSTime stack_checked, stack_logged_at;
+/* the thread the game runs on, and the part of its stack that holds the
+pattern (wiiu_main_stack_watch): from the bottom, past the system's mark,
+to the top */
+static OSThread *watched_thread;
+static uint32_t *stack_low, *stack_high;
+static uint32_t stack_mark;
+static int stack_mark_logged;
 
 /* function(argument) on the main thread, for the game's thread (which
 waits for it); on any other thread, there and then */
@@ -85,6 +92,13 @@ int wiiu_main_call(int (*function)(int), int argument)
 OSThread *wiiu_main_game_thread(void)
 {
 	return game_started ? &game_thread : NULL;
+}
+
+/* the thread the game runs on, its own or the main thread (the watch
+thread's) */
+OSThread *wiiu_main_watched_thread(void)
+{
+	return watched_thread;
 }
 
 static int exit_on_main_thread(int status)
@@ -120,20 +134,31 @@ void wiiu_main_stack_watch(void)
 	const uint32_t *word, *end;
 	unsigned long used;
 
-	if (!game_started || !game_stack || (stack_checked && now - stack_checked < OSSecondsToTicks(STACK_CHECK_SECONDS)))
+	unsigned long size;
+
+	if (!watched_thread || !stack_low || (stack_checked && now - stack_checked < OSSecondsToTicks(STACK_CHECK_SECONDS)))
 		return;
 	stack_checked = now;
-	/* (the bottom words are the system's: OSCreateThread's mark) */
-	word = game_stack + 16;
-	end = game_stack + GAME_STACK / sizeof(uint32_t);
-	while (word < end && *word == STACK_PATTERN)
+	/* (the system's mark at the bottom of the stack, as it was at the
+	start: a stack run past its end writes over it) */
+	if (!stack_mark_logged && *(volatile uint32_t *)watched_thread->stackEnd != stack_mark)
+	{
+		wiiu_log("stack: the game's thread ran past the end of its stack: the mark at %p is %08lx, was %08lx",
+			watched_thread->stackEnd, (unsigned long)*(volatile uint32_t *)watched_thread->stackEnd,
+			(unsigned long)stack_mark);
+		stack_mark_logged = 1;
+	}
+	word = stack_low;
+	end = (const uint32_t *)watched_thread->stackStart;
+	size = (unsigned long)((const uint8_t *)end - (const uint8_t *)watched_thread->stackEnd);
+	while (word < stack_high && *word == STACK_PATTERN)
 		word++;
 	used = (unsigned long)((const uint8_t *)end - (const uint8_t *)word);
 	if (stack_logged_at && used < stack_logged + STACK_LOG_GROWTH &&
 		now - stack_logged_at < OSSecondsToTicks(STACK_LOG_SECONDS))
 		return;
-	wiiu_log("stack: the game's thread has used %lu KB of its %lu KB at most", used / 1024,
-		(unsigned long)GAME_STACK / 1024);
+	wiiu_log("stack: the game's thread has used %lu KB of its %lu KB at most%s", used / 1024, size / 1024,
+		word == stack_low ? " (all of it)" : "");
 	stack_logged = used;
 	stack_logged_at = now;
 }
@@ -147,6 +172,23 @@ int __wrap_main(int argc, char **argv)
 		(unsigned long)((uint8_t *)main_thread->stackStart - (uint8_t *)main_thread->stackEnd) / 1024);
 	game_argc = argc;
 	game_argv = argv;
+#ifdef WIIU_GAME_ON_MAIN_THREAD
+	/* (a test build's: the game on the main thread, as before, its stack
+	watched the same way: the pattern from just below here to the bottom) */
+	{
+		uint32_t *here = (uint32_t *)__builtin_frame_address(0) - 64;
+
+		watched_thread = main_thread;
+		stack_mark = *(uint32_t *)main_thread->stackEnd;
+		stack_low = (uint32_t *)main_thread->stackEnd + 16;
+		stack_high = here;
+		for (uint32_t *word = stack_low; word < here; word++)
+			*word = STACK_PATTERN;
+		wiiu_log("main: the game runs on the main thread (a test build); the stack's mark %08lx",
+			(unsigned long)stack_mark);
+		return __real_main(argc, argv);
+	}
+#endif
 	game_stack = memalign(16, GAME_STACK);
 	if (!game_stack)
 	{
@@ -168,6 +210,10 @@ int __wrap_main(int argc, char **argv)
 		return __real_main(argc, argv);
 	}
 	OSSetThreadName(&game_thread, "Halo");
+	watched_thread = &game_thread;
+	stack_mark = *(uint32_t *)game_thread.stackEnd;
+	stack_low = game_stack + 16;
+	stack_high = game_stack + GAME_STACK / sizeof(uint32_t);
 	wiiu_log("main: the game's thread: stack %p to %p (%lu KB), core %lu, priority %ld", game_thread.stackEnd,
 		game_thread.stackStart, (unsigned long)GAME_STACK / 1024, (unsigned long)OSGetCoreId(),
 		(long)OSGetThreadPriority(&game_thread));

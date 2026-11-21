@@ -90,6 +90,7 @@ run on the main thread for it, and the stack's depth logged (the watch
 thread's) */
 int wiiu_main_call(int (*function)(int), int argument);
 struct OSThread *wiiu_main_game_thread(void);
+struct OSThread *wiiu_main_watched_thread(void);
 void wiiu_main_stack_watch(void);
 
 /* the network (wiiu_net.c): up as Butter and Jelly brings it up, once;

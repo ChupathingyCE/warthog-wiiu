@@ -969,9 +969,9 @@ if it was running, as it is with OSSuspendThread (nothing is logged while it
 is stopped: it may hold the log's lock) */
 static void watch_stall_log(OSTime since)
 {
-	OSThread *game = wiiu_main_game_thread();
+	OSThread *game = wiiu_main_watched_thread();
 	uint32_t srr0 = 0, lr = 0, r1 = 0, top = 0;
-	const char *how = "on the main thread (not read)";
+	const char *how = "not known";
 	int tries;
 
 	if (game)
