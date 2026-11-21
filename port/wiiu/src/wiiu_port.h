@@ -92,6 +92,11 @@ int wiiu_main_call(int (*function)(int), int argument);
 struct OSThread *wiiu_main_game_thread(void);
 struct OSThread *wiiu_main_watched_thread(void);
 void wiiu_main_stack_watch(void);
+void wiiu_main_crumb(const char *step);
+int wiiu_main_crumb_read(const char **step, unsigned long *age_ms, unsigned long *depth, unsigned long *deepest,
+	const char **deepest_step, unsigned long *stack_size);
+/* the watch thread stopped (the end's first step: wiiu_proc.c) */
+void wiiu_gl_watch_stop(void);
 
 /* the network (wiiu_net.c): up as Butter and Jelly brings it up, once;
 nonzero if it is */

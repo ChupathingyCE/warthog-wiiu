@@ -46,6 +46,8 @@ static void proc_end(void)
 {
 	wiiu_exit_begin();
 	wiiu_exit_phase("proc_end: begun");
+	/* (the watch first: it logs while no frame comes, as in the end) */
+	wiiu_gl_watch_stop();
 	wiiu_log("system: the game ended");
 	/* (every line from here written as it comes, the writer thread
 	stopped first: docs/exit.md) */
@@ -214,6 +216,7 @@ int wiiu_proc_update(void)
 	if (quit_requested)
 		return 0;
 	wiiu_screen_update();
+	wiiu_main_crumb("the frame's system messages");
 	proc_last_service = OSGetSystemTime();
 	proc_in_service = 1;
 	/* (on the main thread, which owns ProcUI: wiiu_main.c) */

@@ -705,6 +705,7 @@ static void watch_step(const char *step)
 {
 	watch.step = step;
 	watch.step_time = OSGetSystemTime();
+	wiiu_main_crumb(step);
 }
 
 void wiiu_gl_step(const char *step)
@@ -962,44 +963,21 @@ while the log's writer thread takes the lines, wiiu_log.c) */
 	watch.period_start = now;
 }
 
-/* (watch_main's) where the game's thread is: its state, and the registers
-it was last switched out with (srr0, where it was; lr, the function it was
-called from; r1, its stack pointer), read once it has stopped for a moment
-if it was running, as it is with OSSuspendThread (nothing is logged while it
-is stopped: it may hold the log's lock) */
+/* (watch_main's) where the game's thread is, from the breadcrumbs it
+leaves itself (wiiu_main_crumb): the last place it passed and how long ago,
+its stack pointer there, and the deepest it has been. The watch only reads
+them: it never stops the game's thread (OSSuspendThread from here hung the
+start on the console). */
 static void watch_stall_log(OSTime since)
 {
-	OSThread *game = wiiu_main_watched_thread();
-	uint32_t srr0 = 0, lr = 0, r1 = 0, top = 0;
-	const char *how = "not known";
-	int tries;
+	const char *step = "none", *deepest_step = "none";
+	unsigned long age = 0, depth = 0, deepest = 0, size = 0;
 
-	if (game)
-	{
-		top = (uint32_t)game->stackStart;
-		if (game->state & (OS_THREAD_STATE_RUNNING | OS_THREAD_STATE_READY))
-		{
-			OSSuspendThread(game);
-			for (tries = 0; tries < 20 && (game->state & OS_THREAD_STATE_RUNNING); tries++)
-				OSSleepTicks(OSMillisecondsToTicks(1));
-			how = game->state & OS_THREAD_STATE_RUNNING ? "running (not stopped in 20 ms: its last switch's registers)" : "running";
-			srr0 = game->context.srr0;
-			lr = game->context.lr;
-			r1 = game->context.gpr[1];
-			OSResumeThread(game);
-		}
-		else
-		{
-			how = game->state & OS_THREAD_STATE_WAITING ? "waiting" : "stopped";
-			srr0 = game->context.srr0;
-			lr = game->context.lr;
-			r1 = game->context.gpr[1];
-		}
-	}
-	wiiu_log("gl: watch: no frame for %lu s (frame %lu, the last step %s): the game's thread %s at srr0 %08lx lr %08lx, "
-		"r1 %08lx (%lu KB into its stack)", (unsigned long)(OSTicksToMilliseconds(since) / 1000), gl.frame,
-		watch.step ? watch.step : "none", how, (unsigned long)srr0, (unsigned long)lr, (unsigned long)r1,
-		(unsigned long)(top > r1 && r1 ? (top - r1) / 1024 : 0));
+	wiiu_main_crumb_read(&step, &age, &depth, &deepest, &deepest_step, &size);
+	wiiu_log("gl: watch: no frame for %lu s (frame %lu): the game's thread last at %s %lu ms ago, %lu KB into its "
+		"stack; the deepest %lu KB (at %s), of %lu KB%s", (unsigned long)(OSTicksToMilliseconds(since) / 1000),
+		gl.frame, step, age, depth / 1024, deepest / 1024, deepest_step, size / 1024,
+		size && deepest > size ? ": past its end" : "");
 }
 
 /* the watch thread: where the game's thread has stayed for more than 3 s,
@@ -1013,7 +991,8 @@ static int watch_main(int argc, const char **argv)
 	const char *logged = NULL;
 	OSTime logged_at = 0;
 	unsigned long last_frame = gl.frame;
-	OSTime frame_seen = OSGetSystemTime(), stall_logged = 0;
+	OSTime started = OSGetSystemTime(), frame_seen = started, stall_logged = 0;
+	int drawn = 0;
 
 	(void)argc;
 	(void)argv;
@@ -1025,13 +1004,17 @@ static int watch_main(int argc, const char **argv)
 		OSSleepTicks(OSMillisecondsToTicks(500));
 		now = OSGetSystemTime();
 		wiiu_main_stack_watch();
+		if (gl.frame_draws)
+			drawn = 1;
 		if (gl.frame != last_frame || wiiu_proc_waiting())
 		{
 			last_frame = gl.frame;
 			frame_seen = now;
 			stall_logged = 0;
 		}
-		else if (now - frame_seen >= OSSecondsToTicks(3) &&
+		/* (not in the start's first 20 s, before a frame has drawn
+		anything: the start goes seconds without a frame) */
+		else if ((drawn || now - started >= OSSecondsToTicks(20)) && now - frame_seen >= OSSecondsToTicks(3) &&
 			(!stall_logged || now - stall_logged >= OSSecondsToTicks(10)))
 		{
 			watch_stall_log(now - frame_seen);
@@ -1053,11 +1036,16 @@ static int watch_main(int argc, const char **argv)
 
 static void watch_stop(void)
 {
-	if (!watch.thread)
+	if (!watch.thread || watch.stop)
 		return;
 	watch.stop = 1;
 	OSJoinThread(watch.thread, NULL);
 	watch.thread = NULL;
+}
+
+void wiiu_gl_watch_stop(void)
+{
+	watch_stop();
 }
 
 static void watch_start(void)

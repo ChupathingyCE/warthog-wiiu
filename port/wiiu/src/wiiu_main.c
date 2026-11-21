@@ -37,6 +37,7 @@ deeper, and every 5 minutes.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <coreinit/core.h>
 #include <coreinit/messagequeue.h>
@@ -71,6 +72,12 @@ static OSThread *watched_thread;
 static uint32_t *stack_low, *stack_high;
 static uint32_t stack_mark;
 static int stack_mark_logged;
+/* the game's thread's breadcrumbs (wiiu_main_crumb): written by it alone,
+only read by the watch thread, which never stops it */
+static const char *volatile crumb_step;
+static volatile uint32_t crumb_r1, crumb_deepest_r1;
+static volatile OSTime crumb_time;
+static const char *volatile crumb_deepest_step;
 
 /* function(argument) on the main thread, for the game's thread (which
 waits for it); on any other thread, there and then */
@@ -124,6 +131,57 @@ static int game_main(int argc, const char **argv)
 	(void)argv;
 	exit(__real_main(game_argc, game_argv));
 	return 0;
+}
+
+/* (the game's thread's, at the places it passes often: each frame, each
+GL step, the files' reads, the waits) where it is, and its own stack
+pointer, for the watch thread to read; nothing on other threads */
+void wiiu_main_crumb(const char *step)
+{
+	uint32_t r1;
+
+	if (!watched_thread || OSGetCurrentThread() != watched_thread)
+		return;
+	__asm__ volatile("mr %0, 1" : "=r"(r1));
+	crumb_step = step;
+	crumb_r1 = r1;
+	crumb_time = OSGetSystemTime();
+	if (!crumb_deepest_r1 || r1 < crumb_deepest_r1)
+	{
+		crumb_deepest_r1 = r1;
+		crumb_deepest_step = step;
+	}
+}
+
+/* read(), with a breadcrumb first (--wrap=read): the reads the game's
+files make that pread's poll does not see */
+ssize_t __real_read(int descriptor, void *buffer, size_t count);
+ssize_t __wrap_read(int descriptor, void *buffer, size_t count)
+{
+	wiiu_main_crumb("a file read");
+	return __real_read(descriptor, buffer, count);
+}
+
+/* (the watch thread's) the last breadcrumb, and the deepest; the depths in
+bytes from the top of the game's stack (more than its size: below its
+end) */
+int wiiu_main_crumb_read(const char **step, unsigned long *age_ms, unsigned long *depth, unsigned long *deepest,
+	const char **deepest_step, unsigned long *stack_size)
+{
+	uint32_t top, r1, low;
+
+	if (!watched_thread || !crumb_step)
+		return 0;
+	top = (uint32_t)watched_thread->stackStart;
+	r1 = crumb_r1;
+	low = crumb_deepest_r1;
+	*step = crumb_step;
+	*age_ms = (unsigned long)OSTicksToMilliseconds(OSGetSystemTime() - crumb_time);
+	*depth = top > r1 ? top - r1 : 0;
+	*deepest = top > low ? top - low : 0;
+	*deepest_step = crumb_deepest_step;
+	*stack_size = (unsigned long)((uint8_t *)watched_thread->stackStart - (uint8_t *)watched_thread->stackEnd);
+	return 1;
 }
 
 /* (the watch thread's, every half second) how deep the game's thread has

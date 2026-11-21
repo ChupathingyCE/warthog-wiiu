@@ -27,7 +27,7 @@ same count.
 
 Cemu, then Aroma on a console (`sd:/wiiu/apps/halo/`). `tools/cemu_smoke.sh` runs a package in Cemu (interpreter mode): the main menu, then Blood Gulch for 60 seconds. Its header has the options.
 
-The game runs on a thread of its own with an 8 MB stack (`src/wiiu_main.c`); the main thread keeps ProcUI. `port.txt` has the stack's bounds at the start (`main:`), how deep the game has gone (`stack:`, each time it goes 16 KB deeper and every 5 minutes), and a `gl: watch: no frame for N s` line when no frame comes for 3 seconds or more (a load, or a hang), with where the game's thread is (`srr0`, `lr`, `r1`; `halo.elf`'s symbols name them).
+The game runs on a thread of its own with an 8 MB stack (`src/wiiu_main.c`); the main thread keeps ProcUI. `port.txt` has the stack's bounds at the start (`main:`), how deep the game has gone (`stack:`, each time it goes 16 KB deeper and every 5 minutes), and a `gl: watch: no frame for N s` line when no frame comes for 3 seconds or more (a load, or a hang), with the last place the game's thread passed, how deep in its stack it was there, and the deepest it has been (breadcrumbs the game's thread leaves itself; the watch never stops it).
 
 ## Online
 
