@@ -285,15 +285,20 @@ def _missing(n: Writer, text: str) -> None:
 
 
 def _sdl_include(port: ConsolePort) -> Optional[Path]:
-    """SDL's headers, as the dedicated server's build fetches them (once, into
-    the game's build/server/third_party), as build.ninja names them"""
-    from tools import console_build, server_build
+    """SDL's headers, as the game's tools/sdl_headers.py fetches them (once,
+    into the game's build/server/third_party), as build.ninja names them"""
+    from tools import console_build
+    try:
+        from tools import sdl_headers
+    except ImportError:
+        # (a game from before tools/sdl_headers.py)
+        from tools import server_build as sdl_headers
     cwd = Path.cwd()
     os.chdir(console_build.GAME_ROOT)
     try:
-        if not server_build.fetch_sdl_headers():
+        if not sdl_headers.fetch_sdl_headers():
             return None
-        include = (console_build.GAME_ROOT / server_build.SDL_INCLUDE).resolve()
+        include = (console_build.GAME_ROOT / sdl_headers.SDL_INCLUDE).resolve()
     finally:
         os.chdir(cwd)
     return Path(os.path.relpath(include, cwd))
