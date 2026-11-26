@@ -250,6 +250,16 @@ SDL_FunctionPointer SDL_GL_GetProcAddress(const char *name)
 	return function;
 }
 
+/* (none of the extensions the platform layer asks about: CafeGLSL compiles
+a shader when it is asked to, on the thread that asks, so the shaders a
+map's loading screen prepares are made one after another, a frame's
+budget at a time: the game's d3d8_shader_prep.inl) */
+bool SDL_GL_ExtensionSupported(const char *extension)
+{
+	(void)extension;
+	return false;
+}
+
 /* ---------- sound: the port's (wiiu_audio.c) */
 
 SDL_AudioDeviceID *SDL_GetAudioPlaybackDevices(int *count)
